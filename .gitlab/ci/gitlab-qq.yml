@@ -1,0 +1,117 @@
+# Reusable GitLab notification jobs for NapGram/QQ.
+#
+# Required project/group variables:
+#   MAGISK_GITLAB_QQ_ENABLED=true
+#   MAGISK_GITLAB_QQ_TARGET=target-key configured in NapGram
+#   NAPGRAM_GITLAB_NOTIFIER_URL=https://.../api/gitlab-notifier/publish
+#   NAPGRAM_GITLAB_NOTIFIER_HMAC_SECRET=masked/protected secret
+#   MAGISK_CI_TOOLKIT_REF=<full toolkit commit SHA>
+#
+# The consumer job supplies needs: with the Android build/release artifact job.
+# Project identity and commit/pipeline metadata come from GitLab predefined vars.
+
+.magisk_gitlab_qq_base:
+  image: "alpine:3.22"
+  stage: notify
+  allow_failure: true
+  variables:
+    MAGISK_GITLAB_QQ_ENABLED: "false"
+    MAGISK_GITLAB_QQ_TARGET: ""
+    MAGISK_GITLAB_QQ_CI_BRANCH: "beta"
+    MAGISK_GITLAB_QQ_ARTIFACT_PATTERNS: "*arm64-v8a*.apk"
+    MAGISK_GITLAB_QQ_RELEASE_ARTIFACT_PATTERNS: "*arm64-v8a*.apk"
+    MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
+    MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/magisk-ci-toolkit.git"
+  before_script:
+    - apk add --no-cache bash coreutils curl findutils git jq openssl
+    - |
+      set -euo pipefail
+      : "${MAGISK_CI_TOOLKIT_REF:=main}"
+      if [ ! -d "$MAGISK_CI_TOOLKIT_DIR/.git" ]; then
+        rm -rf "$MAGISK_CI_TOOLKIT_DIR"
+        git init --quiet "$MAGISK_CI_TOOLKIT_DIR"
+        git -C "$MAGISK_CI_TOOLKIT_DIR" remote add origin "$MAGISK_CI_TOOLKIT_REPOSITORY"
+      fi
+      toolkit_repository_auth="$MAGISK_CI_TOOLKIT_REPOSITORY"
+      if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$MAGISK_CI_TOOLKIT_REPOSITORY" == https://gitlab.com/* ]]; then
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+        git -C "$MAGISK_CI_TOOLKIT_DIR" remote set-url origin "$toolkit_repository_auth"
+      fi
+      git -C "$MAGISK_CI_TOOLKIT_DIR" fetch --depth 1 origin "$MAGISK_CI_TOOLKIT_REF"
+      git -C "$MAGISK_CI_TOOLKIT_DIR" checkout --detach --force FETCH_HEAD
+      if [[ "$MAGISK_CI_TOOLKIT_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        resolved_ref="$(git -C "$MAGISK_CI_TOOLKIT_DIR" rev-parse HEAD)"
+        expected_ref="$(printf '%s' "$MAGISK_CI_TOOLKIT_REF" | tr '[:upper:]' '[:lower:]')"
+        [ "$resolved_ref" = "$expected_ref" ] || { echo "Toolkit ref did not resolve to requested SHA" >&2; exit 1; }
+      fi
+
+.magisk_gitlab_qq_ci:
+  extends: .magisk_gitlab_qq_base
+  rules:
+    - if: '$MAGISK_GITLAB_QQ_ENABLED != "true"'
+      when: never
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $MAGISK_GITLAB_QQ_CI_BRANCH'
+      when: on_success
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      artifact_file="$(mktemp)"
+      trap 'rm -f "$artifact_file"' EXIT
+      while IFS= read -r pattern; do
+        [ -n "$pattern" ] || continue
+        find . -type f -name "$pattern" -print0
+      done <<< "$MAGISK_GITLAB_QQ_ARTIFACT_PATTERNS" | sort -zu > "$artifact_file"
+      mapfile -d '' artifacts < "$artifact_file"
+      if [ "${#artifacts[@]}" -eq 0 ]; then
+        echo "No GitLab QQ CI artifacts matched configured patterns; skip."
+        exit 0
+      fi
+      bash "$MAGISK_CI_TOOLKIT_DIR/ci/gitlab_qq_publish.sh" ci "${artifacts[@]}"
+
+.magisk_gitlab_qq_release:
+  extends: .magisk_gitlab_qq_base
+  rules:
+    - if: '$MAGISK_GITLAB_QQ_ENABLED != "true"'
+      when: never
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/'
+      when: on_success
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      artifact_file="$(mktemp)"
+      trap 'rm -f "$artifact_file"' EXIT
+      while IFS= read -r pattern; do
+        [ -n "$pattern" ] || continue
+        find . -type f -name "$pattern" -print0
+      done <<< "$MAGISK_GITLAB_QQ_RELEASE_ARTIFACT_PATTERNS" | sort -zu > "$artifact_file"
+      mapfile -d '' artifacts < "$artifact_file"
+      if [ "${#artifacts[@]}" -eq 0 ]; then
+        echo "No GitLab QQ release artifacts matched configured patterns; skip."
+        exit 0
+      fi
+      export MAGISK_GITLAB_QQ_RELEASE_NOTES_SOURCE="${MAGISK_GITLAB_QQ_RELEASE_NOTES_SOURCE:-docs/CHANGELOG.md}"
+      bash "$MAGISK_CI_TOOLKIT_DIR/ci/gitlab_qq_publish.sh" release "${artifacts[@]}"
+
+.magisk_gitlab_qq_mr:
+  extends: .magisk_gitlab_qq_base
+  rules:
+    - if: '$MAGISK_GITLAB_QQ_ENABLED == "true" && $MAGISK_GITLAB_QQ_MR_ENABLED == "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - when: never
+  script:
+    - bash "$MAGISK_CI_TOOLKIT_DIR/ci/gitlab_qq_publish.sh" merge_request
+
+.magisk_gitlab_qq_failure:
+  extends: .magisk_gitlab_qq_base
+  rules:
+    - if: '$MAGISK_GITLAB_QQ_ENABLED == "true" && $MAGISK_GITLAB_QQ_FAILURE_ENABLED == "true"'
+      when: on_failure
+    - when: never
+  script:
+    - bash "$MAGISK_CI_TOOLKIT_DIR/ci/gitlab_qq_publish.sh" pipeline_failure

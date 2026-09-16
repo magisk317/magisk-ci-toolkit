@@ -1,0 +1,441 @@
+# Reusable GitLab CI templates for Android release pipelines.
+#
+# Consumers include this file together with `.gitlab/ci/android.yml`, then define
+# concrete jobs with `extends`.
+
+.magisk_android_release_tag_rules:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/'
+    - when: never
+
+.magisk_android_release_owner_rules:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab"'
+    - when: never
+
+.magisk_linux_base:
+  image: "debian:trixie-slim"
+  variables:
+    GET_SOURCES_ATTEMPTS: "3"
+    MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
+    MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/magisk-ci-toolkit.git"
+    MAGISK_LINUX_APT_PACKAGES: ""
+    MAGISK_OTEL_EXPORT: "1"
+    MAGISK_OTEL_SERVICE_NAME: "magisk-ci"
+    MAGISK_OTEL_ENDPOINT: "https://136325658.otel.gitlab-o11y.com:14318/v1/traces"
+  hooks:
+    pre_get_sources_script:
+      - git config --global http.version "HTTP/1.1"
+  cache: []
+  before_script:
+    - |
+      set -euo pipefail
+
+      export DEBIAN_FRONTEND=noninteractive
+      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
+      if [[ "$use_mirror" == "true" && ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+        # debian:trixie-slim needs a one-time CA bootstrap before HTTPS mirrors work.
+        apt-get -o APT::Update::Error-Mode=any update
+        apt-get install -y --no-install-recommends ca-certificates
+        rm -rf /var/lib/apt/lists/*
+      fi
+      if [[ "$use_mirror" == "true" ]]; then
+        sed -i \
+          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
+          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+      fi
+      if [[ "$use_mirror" == "true" ]]; then
+        if ! apt-get -o APT::Update::Error-Mode=any update; then
+          echo "Mirror apt-get update failed, falling back to official sources" >&2
+          sed -i \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          apt-get -o APT::Update::Error-Mode=any update
+        fi
+      else
+        apt-get -o APT::Update::Error-Mode=any update
+      fi
+      apt_packages=(bash ca-certificates curl git openssl python3)
+      for package in $MAGISK_LINUX_APT_PACKAGES; do
+        apt_packages+=("$package")
+      done
+      apt-get install -y --no-install-recommends "${apt_packages[@]}"
+      rm -rf /var/lib/apt/lists/*
+
+      chmod +x scripts/resolve_ci_toolkit.sh
+      bash scripts/resolve_ci_toolkit.sh >/dev/null
+  after_script:
+    - |
+      set +e
+      if [ -x "${MAGISK_CI_TOOLKIT_DIR:-}/ci/otel_export.sh" ]; then
+        bash "$MAGISK_CI_TOOLKIT_DIR/ci/otel_export.sh" "ci.job" \
+          "magisk.toolkit_ref=${MAGISK_CI_TOOLKIT_REF:-}" \
+          "magisk.span_source=linux_base_after_script"
+      else
+        echo "otel: helper missing, skip"
+      fi
+
+.magisk_android_release_guard:
+  extends:
+    - .magisk_linux_base
+    - .magisk_android_release_tag_rules
+  stage: release
+  script:
+    - |
+      set -euo pipefail
+      chmod +x scripts/release/check_release_guard.sh
+      scripts/release/check_release_guard.sh "$CI_COMMIT_TAG"
+
+.magisk_android_release_apk:
+  extends:
+    - .magisk_android_base
+    - .magisk_android_release_tag_rules
+  stage: release
+  variables:
+    MAGISK_ANDROID_RELEASE_APK_TASKS: ":app:assembleGithubRelease -PbuildSplits"
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
+      : "${RELEASE_KEYSTORE:?RELEASE_KEYSTORE is required}"
+      : "${STORE_PASSWORD:?STORE_PASSWORD is required}"
+      : "${KEY_ALIAS:?KEY_ALIAS is required}"
+      : "${KEY_PASSWORD:?KEY_PASSWORD is required}"
+
+      keystore_path="$CI_PROJECT_DIR/app/release.jks"
+      mkdir -p "$(dirname "$keystore_path")"
+      printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
+      chmod 0600 "$keystore_path"
+      KEYSTORE_FILE="$keystore_path" \
+      STORE_PASSWORD="$STORE_PASSWORD" \
+      KEY_ALIAS="$KEY_ALIAS" \
+      KEY_PASSWORD="$KEY_PASSWORD" \
+        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_APK_TASKS
+      chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/validate_android_apk_signatures.sh"
+      MAGISK_ANDROID_RELEASE_APK_ROOTS="${MAGISK_ANDROID_RELEASE_APK_ROOTS:-app/build/outputs/apk}" \
+        bash "$MAGISK_CI_TOOLKIT_DIR/release/validate_android_apk_signatures.sh"
+  artifacts:
+    name: "android-release-apks-$CI_COMMIT_TAG"
+    when: always
+    expire_in: 30 days
+    paths:
+      - app/build/outputs/apk/**/release/*.apk
+      - app/build/outputs/native-debug-symbols/**/native-debug-symbols.zip
+
+.magisk_android_release_aab:
+  extends:
+    - .magisk_android_base
+    - .magisk_android_release_tag_rules
+  stage: release
+  variables:
+    MAGISK_ANDROID_RELEASE_AAB_TASKS: ":app:bundlePlayRelease"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $MAGISK_ANDROID_RELEASE_PUBLISH_PLAY == "true"'
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
+      : "${RELEASE_KEYSTORE:?RELEASE_KEYSTORE is required}"
+      : "${STORE_PASSWORD:?STORE_PASSWORD is required}"
+      : "${KEY_ALIAS:?KEY_ALIAS is required}"
+      : "${KEY_PASSWORD:?KEY_PASSWORD is required}"
+
+      keystore_path="$CI_PROJECT_DIR/app/release.jks"
+      mkdir -p "$(dirname "$keystore_path")"
+      printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
+      chmod 0600 "$keystore_path"
+      bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
+        --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+        --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
+        --output "$CI_PROJECT_DIR/play-release.env" \
+        --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
+      source "$CI_PROJECT_DIR/play-release.env"
+      KEYSTORE_FILE="$keystore_path" \
+      STORE_PASSWORD="$STORE_PASSWORD" \
+      KEY_ALIAS="$KEY_ALIAS" \
+      KEY_PASSWORD="$KEY_PASSWORD" \
+        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_AAB_TASKS \
+          -PversionName="$MAGISK_PLAY_VERSION_NAME" -PversionCode="$MAGISK_PLAY_VERSION_CODE"
+  artifacts:
+    name: "android-release-bundle-$CI_COMMIT_TAG"
+    when: always
+    expire_in: 30 days
+    paths:
+      - app/build/outputs/bundle/**/*.aab
+      - app/build/outputs/mapping/**/mapping.txt
+      - app/build/outputs/native-debug-symbols/**/native-debug-symbols.zip
+      - play-release.env
+
+.magisk_android_gitlab_release:
+  extends:
+    - .magisk_linux_base
+    - .magisk_android_release_owner_rules
+  stage: release
+  variables:
+    MAGISK_RELEASE_NOTES_FILE: "release-notes.md"
+    MAGISK_GITLAB_RELEASE_PACKAGE_NAME: "android-release"
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
+
+      chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh" "$MAGISK_CI_TOOLKIT_DIR/release/gitlab_release.sh"
+      release_notes_args=(
+        --tag "$CI_COMMIT_TAG"
+        --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME"
+        --source-repo "${MAGISK_ANDROID_RELEASE_GITHUB_REPOSITORY:-}"
+        --play-url "${MAGISK_ANDROID_RELEASE_PLAY_URL:-}"
+        --gitlab-project-url "$CI_PROJECT_URL"
+        --output "$MAGISK_RELEASE_NOTES_FILE"
+      )
+      if [[ "${MAGISK_ANDROID_RELEASE_SHOW_PLAY_LINK:-true}" != "true" ]]; then
+        release_notes_args+=(--no-play-link)
+      fi
+      "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh" "${release_notes_args[@]}"
+      "$MAGISK_CI_TOOLKIT_DIR/release/gitlab_release.sh"
+
+.magisk_android_publish_play:
+  extends:
+    - .magisk_linux_base
+    - .magisk_android_release_owner_rules
+  stage: release
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab" && $MAGISK_ANDROID_RELEASE_PUBLISH_PLAY == "true"'
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
+      : "${ANDROID_PUBLISHER_CREDENTIALS:?ANDROID_PUBLISHER_CREDENTIALS is required}"
+
+      publisher_credentials_file="$(mktemp)"
+      metadata_staging_dir=''
+      chmod 0600 "$publisher_credentials_file"
+      cleanup_publisher_credentials() {
+        rm -f "$publisher_credentials_file"
+        rm -rf "$metadata_staging_dir"
+      }
+      trap cleanup_publisher_credentials EXIT
+      if printf '%s' "$ANDROID_PUBLISHER_CREDENTIALS" | grep -q '^[[:space:]]*{'; then
+        printf '%s' "$ANDROID_PUBLISHER_CREDENTIALS" > "$publisher_credentials_file"
+      elif ! printf '%s' "$ANDROID_PUBLISHER_CREDENTIALS" | base64 --decode > "$publisher_credentials_file" 2>/dev/null; then
+        echo "ERROR: ANDROID_PUBLISHER_CREDENTIALS must be JSON or base64-encoded JSON" >&2
+        exit 1
+      fi
+      if ! grep -q '"type"[[:space:]]*:[[:space:]]*"service_account"' "$publisher_credentials_file"; then
+        echo "ERROR: ANDROID_PUBLISHER_CREDENTIALS does not look like a service account JSON" >&2
+        exit 1
+      fi
+
+      app_module="${MAGISK_ANDROID_APP_MODULE:-app}"
+      aab_file="$(find "$app_module/build/outputs/bundle" -type f -name '*.aab' | sort | head -n 1)"
+      if [ -z "$aab_file" ]; then
+        echo "ERROR: no .aab found under $app_module/build/outputs/bundle" >&2
+        exit 1
+      fi
+      mapping_file="$(find "$app_module/build/outputs/mapping" -type f -name mapping.txt | sort | head -n 1 || true)"
+      symbols_file="$(find "$app_module/build/outputs/native-debug-symbols" -type f -name native-debug-symbols.zip | sort | head -n 1 || true)"
+      if [[ -f "$CI_PROJECT_DIR/play-release.env" ]]; then
+        # The build job owns the version decision; carry it into this publish job.
+        set -a
+        source "$CI_PROJECT_DIR/play-release.env"
+        set +a
+      else
+        bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
+          --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+          --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
+          --output "$CI_PROJECT_DIR/play-release.env" \
+          --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
+        set -a
+        source "$CI_PROJECT_DIR/play-release.env"
+        set +a
+      fi
+
+      release_track="$MAGISK_PLAY_TRACK"
+      metadata_path=''
+      for candidate in \
+        "$CI_PROJECT_DIR/fastlane/metadata/android" \
+        "$CI_PROJECT_DIR/metadata/android"; do
+        if [[ -d "$candidate" ]]; then
+          metadata_path="$candidate"
+          break
+        fi
+      done
+
+      # Fastlane/Ruby require an explicit UTF-8 locale in the slim image.
+      export LANG=C.UTF-8
+      export LC_ALL=C.UTF-8
+      export LANGUAGE=C.UTF-8
+      export FASTLANE_OPT_OUT_USAGE=1
+      export DEBIAN_FRONTEND=noninteractive
+      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
+      if [[ "$use_mirror" == "true" ]]; then
+        sed -i \
+          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
+          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+      fi
+      if [[ "$use_mirror" == "true" ]]; then
+        if ! apt-get -o APT::Update::Error-Mode=any update; then
+          echo "Mirror apt-get update failed, falling back to official sources" >&2
+          sed -i \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          apt-get -o APT::Update::Error-Mode=any update
+        fi
+      else
+        apt-get -o APT::Update::Error-Mode=any update
+      fi
+      apt-get install -y --no-install-recommends build-essential ruby ruby-dev
+      rm -rf /var/lib/apt/lists/*
+      gem_user_bin="$(ruby -r rubygems -e 'print Gem.user_dir')/bin"
+      export PATH="$gem_user_bin:$PATH"
+      gem install --user-install fastlane --no-document
+
+      cmd=(
+        fastlane supply
+        --aab "$aab_file"
+        --package_name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME"
+        --track "$release_track"
+        --release_status "completed"
+        --json_key "$publisher_credentials_file"
+        --skip_upload_images true
+        --skip_upload_screenshots true
+      )
+      if [[ -n "$metadata_path" ]]; then
+        metadata_staging_dir="$(mktemp -d)"
+        cp -a "$metadata_path/." "$metadata_staging_dir/"
+        version_file="$CI_PROJECT_DIR/gradle/libs.versions.toml"
+        source_version_code=''
+        if [[ -f "$version_file" ]]; then
+          source_version_code="$(sed -nE 's/^versionCode[[:space:]]*=[[:space:]]*"([0-9]+)"/\1/p' "$version_file" | head -n 1)"
+        fi
+        if [[ -n "$source_version_code" && "$source_version_code" != "$MAGISK_PLAY_VERSION_CODE" ]]; then
+          while IFS= read -r changelog_file; do
+            locale_dir="$(dirname "$(dirname "$changelog_file")")"
+            source_changelog="$locale_dir/changelogs/$source_version_code.txt"
+            target_changelog="$locale_dir/changelogs/$MAGISK_PLAY_VERSION_CODE.txt"
+            if [[ -f "$source_changelog" ]]; then
+              cp "$source_changelog" "$target_changelog"
+            fi
+          done < <(find "$metadata_staging_dir" -type f -path '*/changelogs/*.txt' | sort -u)
+        fi
+        cmd+=(--metadata_path "$metadata_staging_dir" --skip_upload_metadata false)
+      else
+        cmd+=(--skip_upload_metadata true)
+      fi
+      if [ -n "$mapping_file" ] && [ -n "$symbols_file" ]; then
+        cmd+=(--mapping_paths "${mapping_file},${symbols_file}")
+      elif [ -n "$mapping_file" ]; then
+        cmd+=(--mapping "$mapping_file")
+      elif [ -n "$symbols_file" ]; then
+        cmd+=(--mapping_paths "$symbols_file")
+      fi
+
+      FASTLANE_SKIP_UPDATE_CHECK=1 \
+      FASTLANE_DISABLE_COLORS=1 \
+      FASTLANE_OPT_OUT_USAGE=1 \
+      CI=true \
+        "${cmd[@]}"
+
+      release_env_file="${MAGISK_RELEASE_ENV_FILE:-play-release-status.env}"
+      {
+        printf 'MAGISK_RELEASE_TRACK=%q\n' "$MAGISK_PLAY_TRACK"
+        printf 'MAGISK_RELEASE_VERSION_NAME=%q\n' "$MAGISK_PLAY_VERSION_NAME"
+        printf 'MAGISK_RELEASE_VERSION_CODE=%q\n' "$MAGISK_PLAY_VERSION_CODE"
+        printf 'MAGISK_RELEASE_STATUS=published\n'
+      } > "$release_env_file"
+
+.magisk_android_publish_modules_repo:
+  extends:
+    - .magisk_linux_base
+    - .magisk_android_release_owner_rules
+  stage: release
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab" && $MAGISK_ANDROID_RELEASE_MODULES_REPO != ""'
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
+      : "${MAGISK_ANDROID_RELEASE_MODULES_REPO:?MAGISK_ANDROID_RELEASE_MODULES_REPO is required}"
+      : "${XPOSED_MODULES_REPO_TOKEN:?XPOSED_MODULES_REPO_TOKEN is required}"
+
+      mapfile -d '' apk_files < <(find app/build/outputs/apk -type f -path '*/release/*.apk' -print0 | sort -z)
+      if [ "${#apk_files[@]}" -eq 0 ]; then
+        echo "ERROR: no release APK files found under app/build/outputs/apk" >&2
+        exit 1
+      fi
+
+      install -d -m 0755 /etc/apt/keyrings
+      export DEBIAN_FRONTEND=noninteractive
+      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
+      if [[ "$use_mirror" == "true" ]]; then
+        sed -i \
+          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
+          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+      fi
+      if [[ "$use_mirror" == "true" ]]; then
+        if ! apt-get -o APT::Update::Error-Mode=any update; then
+          echo "Mirror apt-get update failed, falling back to official sources" >&2
+          sed -i \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          apt-get -o APT::Update::Error-Mode=any update
+        fi
+      else
+        apt-get -o APT::Update::Error-Mode=any update
+      fi
+      apt-get install -y --no-install-recommends gpg
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+      chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list
+      apt-get -o APT::Update::Error-Mode=any update
+      apt-get install -y --no-install-recommends gh
+      rm -rf /var/lib/apt/lists/*
+
+      chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh"
+      GH_TOKEN="$XPOSED_MODULES_REPO_TOKEN" \
+        "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh" \
+          --tag "$CI_COMMIT_TAG" \
+          --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+          --source-repo "${MAGISK_ANDROID_RELEASE_GITHUB_REPOSITORY:-}" \
+          --generate-github-notes \
+          --output release-notes.md
+      export GH_TOKEN="$XPOSED_MODULES_REPO_TOKEN"
+
+      if gh release view "$CI_COMMIT_TAG" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
+        gh release upload "$CI_COMMIT_TAG" "${apk_files[@]}" \
+          --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
+          --clobber
+        gh release edit "$CI_COMMIT_TAG" \
+          --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
+          --title "$CI_COMMIT_TAG" \
+          --draft=false \
+          --notes-file release-notes.md
+      else
+        gh release create "$CI_COMMIT_TAG" "${apk_files[@]}" \
+          --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
+          --title "$CI_COMMIT_TAG" \
+          --notes-file release-notes.md
+      fi

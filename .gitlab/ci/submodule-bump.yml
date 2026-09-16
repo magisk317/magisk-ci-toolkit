@@ -1,0 +1,21 @@
+# Reusable CI template for shared submodules.
+#
+# DISABLED 2026-09-10.
+# Automatic "bump the submodule pointer" merge requests in consumer repos
+# created far too much noise (dozens of stacked chore(submodule) MRs).
+# Consumer repos now bump shared-module pointers deliberately, as part of
+# a real change. The template is kept (rules: never) so that re-enabling is
+# an explicit, reviewable decision rather than an accident.
+#
+# Required CI/CD variable (only if re-enabled):
+#   MAGISK_SUBMODULE_BUMP_TOKEN  GitLab token with api + write_repository scope
+#
+# Consumer registry: ci/submodule_consumers.json (now empty)
+
+.magisk_submodule_bump:
+  image: "alpine:3.22"
+  stage: notify
+  variables:
+    MAGISK_SUBMODULE_NAME: ""
+  rules:
+    - when: never

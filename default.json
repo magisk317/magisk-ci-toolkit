@@ -1,0 +1,228 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Shared Renovate policy for Magisk317 GitLab projects.",
+  "extends": [
+    "config:recommended"
+  ],
+  "ignorePaths": [
+    ".github/**"
+  ],
+  "forkProcessing": "enabled",
+  "pruneStaleBranches": true,
+  "pruneBranchAfterAutomerge": true,
+  "minimumReleaseAge": "24 hours",
+  "internalChecksFilter": "strict",
+  "prCreation": "immediate",
+  "prConcurrentLimit": 1,
+  "branchConcurrentLimit": 1,
+  "commitMessageSuffix": "[renovate]",
+  "prHourlyLimit": 0,
+  "ignoreTests": true,
+  "platformAutomerge": false,
+  "automergeType": "pr",
+  "baseBranchPatterns": [
+    "beta"
+  ],
+  "gitSubmodules": {
+    "enabled": true
+  },
+  "ignoreDeps": [
+    "rustls:rustls-platform-verifier",
+    "org.matrix.rustcomponents:sdk-android"
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "gradle",
+        "maven"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "gradle",
+        "maven"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "npm",
+        "pnpm"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "npm",
+        "pnpm"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "docker-compose",
+        "dockerfile",
+        "gitlabci",
+        "gitlabci-include",
+        "gradle-wrapper"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "docker-compose",
+        "dockerfile",
+        "gitlabci",
+        "gitlabci-include",
+        "gradle-wrapper"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "recreateWhen": "always",
+      "automergeType": "pr"
+    },
+    {
+      "matchManagers": [
+        "gradle",
+        "maven"
+      ],
+      "addLabels": [
+        "dependencies",
+        "java"
+      ]
+    },
+    {
+      "description": "Magisk Mobile artifacts are only published to the organization's private Maven registry.",
+      "matchDatasources": [
+        "maven"
+      ],
+      "matchPackageNames": [
+        "/^com\\.magisk317\\.mobile:.+/"
+      ],
+      "registryUrls": [
+        "https://gitlab.com/api/v4/projects/85187820/packages/maven"
+      ]
+    },
+    {
+      "matchManagers": [
+        "npm",
+        "pnpm"
+      ],
+      "addLabels": [
+        "dependencies",
+        "javascript"
+      ]
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "addLabels": [
+        "dependencies",
+        "github_actions"
+      ]
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "addLabels": [
+        "dependencies",
+        "rust"
+      ]
+    },
+    {
+      "description": "Gradle buildConfigField int constants are project metadata, not Maven packages.",
+      "matchPackageNames": [
+        "/^int:/"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The root Gradle force block is maintained by dependency-force-manager, not Renovate.",
+      "matchManagers": [
+        "gradle"
+      ],
+      "matchFileNames": [
+        "build.gradle.kts"
+      ],
+      "enabled": false
+    }
+  ],
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security"
+    ]
+  },
+  "timezone": "Asia/Shanghai",
+  "dependencyDashboard": true,
+  "dependencyDashboardOSVVulnerabilitySummary": "all",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": false
+  }
+}

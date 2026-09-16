@@ -1,0 +1,142 @@
+# Reusable GitLab CI template for self-hosted Renovate.
+#
+# Consumer projects either set `MAGISK_RENOVATE_REPOSITORY` for the shared
+# GitLab defaults or provide a platform-specific Renovate config file.
+
+.magisk_renovate_gitlab:
+  # A serial orchestrator must survive the beta push produced by its own
+  # merge. The protected Renovate controller cancels obsolete orchestrators.
+  interruptible: false
+  image: "renovate/renovate:43.251.3"
+  stage: maintenance
+  needs: []
+  variables:
+    RENOVATE_BASE_DIR: "$CI_PROJECT_DIR/.renovate"
+    RENOVATE_CONFIG_FILE: ".gitlab/renovate-config.js"
+    RENOVATE_REQUIRE_CONFIG: "required"
+    LOG_LEVEL: "debug"
+    OTEL_NODE_RESOURCE_DETECTORS: "env"
+    HTTP_PROXY: "$CI_HTTP_PROXY"
+    HTTPS_PROXY: "$CI_HTTPS_PROXY"
+    ALL_PROXY: "$CI_ALL_PROXY"
+    NO_PROXY: "$CI_NO_PROXY"
+    http_proxy: "$CI_HTTP_PROXY"
+    https_proxy: "$CI_HTTPS_PROXY"
+    all_proxy: "$CI_ALL_PROXY"
+    no_proxy: "$CI_NO_PROXY"
+    MAGISK_RENOVATE_PLATFORM_AUTOMERGE: "false"
+    MAGISK_RENOVATE_IGNORE_TESTS: "true"
+    MAGISK_RENOVATE_MR_POLL_INTERVAL_SECONDS: "5"
+    MAGISK_RENOVATE_MR_MAX_POLLS: "120"
+    MAGISK_RENOVATE_NO_MR_GRACE_POLLS: "3"
+    MAGISK_RENOVATE_GIT_AUTHOR: "Renovate <40025304-Renovate317@users.noreply.gitlab.com>"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api"'
+    - when: never
+  script:
+    # Renovate enables OTLP whenever the endpoint is set, even when empty.
+    - unset OTEL_EXPORTER_OTLP_ENDPOINT
+    - test -n "${RENOVATE_TOKEN:-}" || { echo "RENOVATE_TOKEN is required for GitLab Renovate" >&2; exit 2; }
+    - |
+      if [ -n "${HTTP_PROXY:-${http_proxy:-}}" ] || [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ] || [ -n "${ALL_PROXY:-${all_proxy:-}}" ]; then
+        echo "Configured Renovate proxy environment from CI_*_PROXY variables"
+      fi
+    - |
+      set -euo pipefail
+
+      if [ -n "${MAGISK_RENOVATE_REPOSITORY:-}" ]; then
+        node <<'NODE' > config.js
+      const fs = require("fs");
+
+      const truthy = (name, fallback = false) => {
+        const value = process.env[name];
+        if (value == null || value === "") return fallback;
+        return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+      };
+
+      const config = {
+        platform: "gitlab",
+        endpoint: process.env.CI_API_V4_URL || "https://gitlab.com/api/v4/",
+        repositories: [process.env.MAGISK_RENOVATE_REPOSITORY],
+        onboarding: false,
+        requireConfig: "required",
+        configFileNames: fs.existsSync(".gitlab/renovate.json")
+          ? [".gitlab/renovate.json"]
+          : ["renovate.json"],
+        dependencyDashboard: true,
+        dependencyDashboardOSVVulnerabilitySummary: "all",
+        ignorePaths: [".github/**"],
+        allowedUnsafeExecutions: ["gradleWrapper"],
+        // Renovate only discovers and updates the MR. The protected toolkit
+        // controller is the sole merge executor for trusted consumers.
+        automerge: false,
+        automergeType: "pr",
+        automergeStrategy: "merge",
+        platformAutomerge: truthy("MAGISK_RENOVATE_PLATFORM_AUTOMERGE", false),
+        prConcurrentLimit: 1,
+        branchConcurrentLimit: 1,
+        prHourlyLimit: 0,
+        cacheDir: `/tmp/renovate-cache-${process.env.CI_JOB_ID || "local"}`,
+      };
+
+      if (truthy("MAGISK_RENOVATE_IGNORE_TESTS")) {
+        config.ignoreTests = true;
+      }
+
+      if (process.env.MAGISK_RENOVATE_GIT_AUTHOR) {
+        config.gitAuthor = process.env.MAGISK_RENOVATE_GIT_AUTHOR;
+      }
+
+      // Authenticate to the GitLab Package Registry so Renovate can look up
+      // private maven artifacts published by sibling projects. GitLab accepts
+      // CI_JOB_TOKEN as the password for HTTP Basic authentication; Renovate's
+      // default token handling would send an unsupported Bearer credential.
+      if (process.env.CI_JOB_TOKEN) {
+        const v4Endpoint = process.env.CI_API_V4_URL || "https://gitlab.com/api/v4/";
+        config.hostRules = [
+          ...(config.hostRules || []),
+          {
+            hostType: "maven",
+            matchHost: v4Endpoint,
+            username: "gitlab-ci-token",
+            password: process.env.CI_JOB_TOKEN,
+          },
+        ];
+      }
+
+      process.stdout.write(`module.exports = ${JSON.stringify(config, null, 2)};\n`);
+      NODE
+      else
+        test -f "$RENOVATE_CONFIG_FILE" || { echo "$RENOVATE_CONFIG_FILE is required for GitLab Renovate" >&2; exit 2; }
+        if [ "$RENOVATE_CONFIG_FILE" != "config.js" ]; then
+          cp "$RENOVATE_CONFIG_FILE" config.js
+        fi
+      fi
+
+      export RENOVATE_CONFIG_FILE=config.js
+    - |
+      set -euo pipefail
+      toolkit_dir="$(mktemp -d)"
+      trap 'rm -rf -- "$toolkit_dir"' EXIT
+      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+      toolkit_ref="${MAGISK_CI_TOOLKIT_REF:-}"
+      test -n "$toolkit_ref" || { echo "MAGISK_CI_TOOLKIT_REF is required" >&2; exit 2; }
+      toolkit_repository_auth="$toolkit_repository"
+      if [[ -n "${CI_JOB_TOKEN:-}" && "$toolkit_repository" == https://gitlab.com/* ]]; then
+        toolkit_repository_auth="${toolkit_repository/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+      fi
+      git init --quiet "$toolkit_dir/repo"
+      git -C "$toolkit_dir/repo" remote add origin "$toolkit_repository_auth"
+      git -C "$toolkit_dir/repo" fetch --depth 1 origin "$toolkit_ref"
+      git -C "$toolkit_dir/repo" checkout --detach --force FETCH_HEAD
+      if [[ "$toolkit_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        resolved_toolkit_ref="$(git -C "$toolkit_dir/repo" rev-parse HEAD)"
+        expected_toolkit_ref="$(printf '%s' "$toolkit_ref" | tr '[:upper:]' '[:lower:]')"
+        [[ "$resolved_toolkit_ref" == "$expected_toolkit_ref" ]] || {
+          echo "resolved toolkit commit $resolved_toolkit_ref does not match pinned ref $toolkit_ref" >&2
+          exit 1
+        }
+      fi
+      bash "$toolkit_dir/repo/ci/renovate_serial_loop.sh"

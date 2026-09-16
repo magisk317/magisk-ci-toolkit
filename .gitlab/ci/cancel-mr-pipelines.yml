@@ -1,0 +1,42 @@
+# Consumers opt in by extending .magisk_cancel_older_mr_pipelines. The
+# protected controller handles MR/push cleanup and Renovate pipeline
+# coordination. Renovate schedule/web/API pipelines use latest-wins so only
+# one serial Renovate orchestrator remains active for a branch.
+
+.magisk_cancel_older_mr_pipelines:
+  stage: .pre
+  interruptible: true
+  allow_failure: true
+  rules:
+    - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
+      variables:
+        MAGISK_UPSTREAM_REF: "$CI_MERGE_REQUEST_REF_PATH"
+        MAGISK_TRIGGER_PIPELINE_KIND: "mr_or_push"
+    - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "push"'
+      variables:
+        MAGISK_UPSTREAM_REF: "$CI_COMMIT_REF_NAME"
+        MAGISK_TRIGGER_PIPELINE_KIND: "mr_or_push"
+    - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "schedule"'
+      variables:
+        MAGISK_UPSTREAM_REF: "$CI_COMMIT_REF_NAME"
+        MAGISK_TRIGGER_PIPELINE_KIND: "renovate"
+    - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web"'
+      variables:
+        MAGISK_UPSTREAM_REF: "$CI_COMMIT_REF_NAME"
+        MAGISK_TRIGGER_PIPELINE_KIND: "renovate"
+    - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api"'
+      variables:
+        MAGISK_UPSTREAM_REF: "$CI_COMMIT_REF_NAME"
+        MAGISK_TRIGGER_PIPELINE_KIND: "renovate"
+    - when: never
+  trigger:
+    project: magisk3171/shared/magisk-ci-toolkit
+    branch: main
+    strategy: depend
+  variables:
+    MAGISK_UPSTREAM_PROJECT_ID: "$CI_PROJECT_ID"
+    MAGISK_UPSTREAM_PROJECT_PATH: "$CI_PROJECT_PATH"
+    MAGISK_UPSTREAM_PIPELINE_ID: "$CI_PIPELINE_ID"
+    MAGISK_UPSTREAM_PIPELINE_IID: "$CI_PIPELINE_IID"
+    MAGISK_UPSTREAM_PIPELINE_SOURCE: "$CI_PIPELINE_SOURCE"
+    MAGISK_UPSTREAM_PIPELINE_KIND: "$MAGISK_TRIGGER_PIPELINE_KIND"

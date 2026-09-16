@@ -1,0 +1,1259 @@
+# Shared Telegram notification templates for GitLab CI.
+# One media-group message: each APK shows its filename; CI/release text is
+# appended on the last item caption by default (TG_MEDIA_CAPTION_POSITION=last).
+#
+# De-dupe:
+#   - telegram CI template skips tag pipelines (rules: CI_COMMIT_TAG when: never)
+#   - telegram CI template skips schedule pipelines (Renovate-only; no APK build)
+#   - telegram release template runs only on v*.*.* tags
+#   - CI script also limits to MAGISK_TELEGRAM_CI_BRANCH / renovate/*
+#   - CI notify requires matched artifacts; bare text fallback is disabled
+#   - image-list notify (.magisk_telegram_images) sends pure text with Images:
+#
+# Optional CI/CD variables:
+#   TG_API_BASE                default https://api.telegram.org
+#                              Local Bot API example for self-hosted runners:
+#                              http://telegram-bot-api.internal:18081
+#   TG_MAX_FILESIZE            default 52428800 (50MB); raise when using Local Bot API
+#   TG_MEDIA_CAPTION_POSITION  last|first (default last / footer)
+#   MAGISK_TELEGRAM_VERSION_NAME  override auto-detected app versionName
+#   TG_BOT_TOKEN / TG_CHAT_ID  required
+#   TG_CI_THREAD_ID / TG_THREAD_ID  optional forum topics
+
+.magisk_telegram_ci:
+  image: "alpine:3.22"
+  stage: notify
+  variables:
+    MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
+    MAGISK_TELEGRAM_PROJECT_NAME: "$CI_PROJECT_NAME"
+    MAGISK_TELEGRAM_CI_ARTIFACT_PATTERN: "*arm64-v8a*.apk"
+    MAGISK_TELEGRAM_CI_BRANCH: "beta"
+    MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
+  # Never pair with release notify on tags; release job owns tag notifications.
+  # Schedule pipelines are usually Renovate/maintenance-only and do not produce APKs.
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
+  before_script:
+    - apk add --no-cache bash coreutils curl findutils git
+    - |
+      if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        echo "Python interpreter already present; skip install."
+      else
+        apk add --no-cache python3
+      fi
+    - |
+      # The rolling pin reads capture_ids.py from the pinned toolkit checkout.
+      ref="main"
+      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+        ref="$MAGISK_CI_TOOLKIT_REF"
+      fi
+      toolkit_dir="${MAGISK_CI_TOOLKIT_DIR:-$CI_PROJECT_DIR/.magisk-ci-toolkit}"
+      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      case "$toolkit_repository" in
+        https://gitlab.com/*)
+          if [ -n "${CI_JOB_TOKEN:-}" ]; then
+            toolkit_repository="https://gitlab-ci-token:${CI_JOB_TOKEN}@${toolkit_repository#https://}"
+          fi
+          ;;
+      esac
+      rm -rf "$toolkit_dir"
+      if git init --quiet "$toolkit_dir" \
+        && git -C "$toolkit_dir" remote add origin "$toolkit_repository" \
+        && git -C "$toolkit_dir" fetch --quiet --depth 1 origin "$ref" \
+        && git -C "$toolkit_dir" checkout --quiet --detach --force FETCH_HEAD; then
+        non_hex=0
+        case "$ref" in
+          ''|*[!0-9a-fA-F]*) non_hex=1 ;;
+        esac
+        if [ "$non_hex" -eq 0 ] && [ "${#ref}" -eq 40 ] \
+          && [ "$(git -C "$toolkit_dir" rev-parse HEAD)" != "$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')" ]; then
+          echo "resolved toolkit commit does not match pinned ref $ref; Telegram pin will be skipped" >&2
+          rm -rf "$toolkit_dir"
+        fi
+      else
+        echo "toolkit checkout failed; Telegram pin will be skipped" >&2
+        rm -rf "$toolkit_dir"
+      fi
+
+  after_script:
+    - |
+      set +e
+      apk add --no-cache bash curl python3 >/dev/null 2>&1 || true
+      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+        ref="$MAGISK_CI_TOOLKIT_REF"
+      else
+        ref="main"
+      fi
+      tmp="$(mktemp -d)"
+      if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
+        git init --quiet "$tmp/toolkit"
+        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
+          toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+          git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
+        fi
+        git -C "$tmp/toolkit" fetch --depth 1 origin "$ref" && git -C "$tmp/toolkit" checkout --detach --force FETCH_HEAD
+        if [ -x "$tmp/toolkit/ci/otel_export.sh" ]; then
+          export MAGISK_OTEL_SERVICE_NAME="${MAGISK_OTEL_SERVICE_NAME:-magisk-ci}"
+          bash "$tmp/toolkit/ci/otel_export.sh" "ci.telegram" "magisk.span_source=telegram_after_script"
+        fi
+      fi
+
+  script:
+    - |
+      cat > /tmp/magisk_telegram_ci.sh <<'MAGISK_TELEGRAM_CI_EOF'
+      set -euo pipefail
+      if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
+        echo "TG_BOT_TOKEN/TG_CHAT_ID not set, skip."
+        exit 0
+      fi
+
+      target_branch="${MAGISK_TELEGRAM_CI_BRANCH:-beta}"
+      source_branch="${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-}"
+      if [ "${CI_COMMIT_BRANCH:-}" != "$target_branch" ] && [[ "${source_branch}" != renovate/* ]]; then
+        echo "Branch ${CI_COMMIT_BRANCH:-${source_branch:-}} is not $target_branch and not a Renovate MR; skip."
+        exit 0
+      fi
+      TG_API_BASE="${TG_API_BASE:-https://api.telegram.org}"
+      TG_API_BASE="${TG_API_BASE%/}"
+      TG_MAX_FILESIZE="${TG_MAX_FILESIZE:-$((50 * 1024 * 1024))}"
+      TG_MEDIA_CAPTION_POSITION="${TG_MEDIA_CAPTION_POSITION:-last}"
+      TG_MEDIA_CAPTION_MAX=1024
+
+      python_bin=""
+      if command -v python3 >/dev/null 2>&1; then
+        python_bin="python3"
+      elif command -v python >/dev/null 2>&1; then
+        python_bin="python"
+      fi
+
+      telegram_html_escape() {
+        local value=${1:-}
+        value=${value//&/\&amp;}
+        value=${value//</\&lt;}
+        value=${value//>/\&gt;}
+        value=${value//\"/\&quot;}
+        printf '%s' "$value"
+      }
+
+      telegram_html_link() {
+        local url=$1
+        local label=$2
+        if [ -z "$url" ]; then
+          telegram_html_escape "$label"
+          return
+        fi
+        printf '<a href="%s">%s</a>' "$(telegram_html_escape "$url")" "$(telegram_html_escape "$label")"
+      }
+
+      telegram_version_hashtag() {
+        local version="${MAGISK_TELEGRAM_VERSION_NAME:-}"
+        if [ -z "$version" ] && [ -f gradle/libs.versions.toml ]; then
+          version="$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]*=/{print $2; exit}' gradle/libs.versions.toml)"
+        fi
+        if [ -z "$version" ] && [ -f package.json ]; then
+          version="$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/{print $4; exit}' package.json)"
+        fi
+        if [ -z "$version" ]; then
+          version="${CI_COMMIT_TAG:-}"
+        fi
+        version="${version#v}"
+        version="${version#V}"
+        version="$(printf '%s' "$version" | sed -E 's/[^[:alnum:]_]+/_/g; s/^_+//; s/_+$//')"
+        [ -n "$version" ] && printf '#v%s' "$version"
+        return 0
+      }
+
+      telegram_version_display() {
+        local version="${MAGISK_TELEGRAM_VERSION_NAME:-}"
+        if [ -z "$version" ] && [ -f gradle/libs.versions.toml ]; then
+          version="$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]*=/{print $2; exit}' gradle/libs.versions.toml)"
+        fi
+        if [ -z "$version" ] && [ -f package.json ]; then
+          version="$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/{print $4; exit}' package.json)"
+        fi
+        if [ -z "$version" ]; then
+          version="${CI_COMMIT_TAG:-}"
+        fi
+        version="${version#v}"
+        version="${version#V}"
+        [ -n "$version" ] && printf 'v%s' "$version"
+        return 0
+      }
+
+      telegram_json_escape() {
+        local value=${1:-}
+        value=${value//\\/\\\\}
+        value=${value//\"/\\\"}
+        value=${value//$'\n'/\\n}
+        value=${value//$'\r'/\\r}
+        value=${value//$'\t'/\\t}
+        printf '%s' "$value"
+      }
+
+      telegram_truncate_caption() {
+        local value=${1:-}
+        if [ "${#value}" -le "$TG_MEDIA_CAPTION_MAX" ]; then
+          printf '%s' "$value"
+          return 0
+        fi
+        printf '%s…' "${value:0:$((TG_MEDIA_CAPTION_MAX - 1))}"
+      }
+
+      telegram_upload_name() {
+        local name=$1
+        local max_len=60
+        if [ "${#name}" -le "$max_len" ]; then
+          printf '%s' "$name"
+          return 0
+        fi
+        local ext=""
+        local stem=$name
+        if [[ "$name" == *.* ]]; then
+          ext=".${name##*.}"
+          stem="${name%.*}"
+        fi
+        local keep=$((max_len - ${#ext} - 2))
+        if [ "$keep" -lt 16 ]; then
+          printf '%s' "$name"
+          return 0
+        fi
+        local head_len=$((keep / 2))
+        local tail_len=$((keep - head_len))
+        printf '%s__%s%s' "${stem:0:head_len}" "${stem: -tail_len}" "$ext"
+      }
+
+      telegram_api_url() {
+        printf '%s/bot%s/%s' "$TG_API_BASE" "$TG_BOT_TOKEN" "$1"
+      }
+
+      # --- optional rolling pin (MAGISK_TELEGRAM_PIN=latest) ---
+      TELEGRAM_LAST_MESSAGE_IDS=""
+
+      telegram_capture_message_ids() {
+        local resp=${1:-}
+        [ -n "$resp" ] || return 0
+        local ids
+        ids=""
+        if [ -n "$python_bin" ] && [ -f "$MAGISK_CI_TOOLKIT_DIR/ci/capture_ids.py" ]; then
+          ids="$(printf '%s' "$resp" | "$python_bin" "$MAGISK_CI_TOOLKIT_DIR/ci/capture_ids.py" 2>/dev/null)" || {
+            echo "capture_ids failed; Telegram pin will be skipped" >&2
+            ids=""
+          }
+        fi
+        [ -n "$ids" ] || return 0
+        TELEGRAM_LAST_MESSAGE_IDS="$ids"
+      }
+
+      telegram_read_pin_var() {
+        local var_name=$1
+        local val=""
+        if [ -n "${GITLAB_API_TOKEN:-}" ] && [ -n "${CI_PROJECT_ID:-}" ]; then
+          val="$(curl -sS --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            "${CI_API_V4_URL:-https://gitlab.com/api/v4}/projects/$CI_PROJECT_ID/variables/$var_name" 2>/dev/null \
+            | sed -nE 's/.*"value":"?([^"]*)"?.*/\1/p' || true)"
+        fi
+        [ "$val" != "0" ] && [ -n "$val" ] && printf '%s' "$val" || true
+      }
+
+      telegram_write_pin_var() {
+        local var_name=$1 value=$2
+        [ -n "${GITLAB_API_TOKEN:-}" ] && [ -n "${CI_PROJECT_ID:-}" ] || return 0
+        local api="${CI_API_V4_URL:-https://gitlab.com/api/v4}"
+        local rc
+        rc="$(curl -sS -o /dev/null -w '%{http_code}' --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+          "$api/projects/$CI_PROJECT_ID/variables/$var_name" 2>/dev/null || true)"
+        if [ "$rc" = "200" ]; then
+          curl -sS -X PUT --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            "$api/projects/$CI_PROJECT_ID/variables/$var_name" \
+            --form "value=$value" >/dev/null 2>&1 || true
+        else
+          curl -sS -X POST --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            "$api/projects/$CI_PROJECT_ID/variables" \
+            --form "key=$var_name" --form "value=$value" >/dev/null 2>&1 || true
+        fi
+      }
+
+      telegram_pin_latest() {
+        [ "${MAGISK_TELEGRAM_PIN:-latest}" = "latest" ] || return 0
+        local message_ids=${TELEGRAM_LAST_MESSAGE_IDS:-}
+        if [ -z "$message_ids" ]; then
+          echo "MAGISK_TELEGRAM_PIN=latest but no message id was captured; nothing to pin."
+          return 0
+        fi
+        local pin_type=${2:-ci}
+        local var_name="TG_LAST_$(printf '%s' "$pin_type" | tr '[:lower:]' '[:upper:]')_PIN_ID"
+
+        # Read previous pin IDs from CI variable (cross-pipeline safe)
+        local old_ids=""
+        old_ids="$(telegram_read_pin_var "$var_name")"
+
+        local thread="${1:-}"
+        local any_failed=0
+
+        # Pin every message in the group
+        local mid
+        for mid in $(printf '%s' "$message_ids" | tr ',' ' '); do
+          local pin_args=(-d "chat_id=${TG_CHAT_ID}" -d "message_id=${mid}" -d "disable_notification=true")
+          if [ -n "$thread" ]; then
+            pin_args+=(-d "message_thread_id=$thread")
+          fi
+          local pin_resp
+          pin_resp="$(curl -sS -X POST "$(telegram_api_url pinChatMessage)" "${pin_args[@]}" 2>&1)" || true
+          if ! printf '%s' "$pin_resp" | grep -q '"ok":true'; then
+            echo "Telegram pinChatMessage failed for $mid: $pin_resp" >&2
+            any_failed=1
+          fi
+        done
+
+        if [ "$any_failed" -eq 1 ]; then
+          echo "Some pins failed; keeping previous pinned messages."
+          return 0
+        fi
+
+        # Unpin all previous same-type pins
+        if [ -n "$old_ids" ]; then
+          for mid in $(printf '%s' "$old_ids" | tr ',' ' '); do
+            # Skip if this ID is already in the new set
+            if printf '%s' ",$message_ids," | grep -q ",$mid,"; then
+              continue
+            fi
+            local unpin_args=(-d "chat_id=${TG_CHAT_ID}" -d "message_id=$mid")
+            if [ -n "$thread" ]; then
+              unpin_args+=(-d "message_thread_id=$thread")
+            fi
+            local unpin_resp
+            unpin_resp="$(curl -sS -X POST "$(telegram_api_url unpinChatMessage)" "${unpin_args[@]}" 2>&1)" || true
+            if ! printf '%s' "$unpin_resp" | grep -q '"ok":true'; then
+              echo "Telegram unpinChatMessage failed for $mid: $unpin_resp" >&2
+            fi
+          done
+        fi
+
+        # Store new pin IDs for next run
+        telegram_write_pin_var "$var_name" "$message_ids"
+      }
+
+      send_message() {
+        local thread=$1
+        local text=$2
+        local curl_args=(
+          --fail-with-body
+          -sS
+          -X POST
+          "$(telegram_api_url sendMessage)"
+          -d "chat_id=${TG_CHAT_ID}"
+          --data-urlencode "text=${text}"
+          -d "parse_mode=HTML"
+          -d "disable_web_page_preview=true"
+        )
+        if [ -n "$thread" ]; then
+          curl_args+=(-d "message_thread_id=$thread")
+        fi
+        local resp
+        if ! resp="$(curl "${curl_args[@]}")"; then
+          printf '%s\n' "$resp" >&2
+          exit 1
+        fi
+        telegram_capture_message_ids "$resp"
+      }
+
+      send_document() {
+        local file=$1
+        local thread=$2
+        local caption=$3
+        local size name upload_name
+        size=$(stat -c%s "$file")
+        name=$(basename "$file")
+        upload_name=$(telegram_upload_name "$name")
+        if [ "$size" -gt "$TG_MAX_FILESIZE" ]; then
+          local msg
+          msg=$(printf '📦 %s (%sMB) exceeds Telegram upload limit.\n🔗 Download: %s' \
+            "$(telegram_html_escape "$name")" \
+            "$((size / 1024 / 1024))" \
+            "$(telegram_html_link "${OVERSIZE_LINK_URL:-$CI_PIPELINE_URL}" "${OVERSIZE_LINK_LABEL:-${CI_PIPELINE_ID:-pipeline}}")")
+          send_message "$thread" "$msg"
+          return 0
+        fi
+        local curl_args=(
+          --fail-with-body
+          -sS
+          -X POST
+          "$(telegram_api_url sendDocument)"
+          -F "chat_id=${TG_CHAT_ID}"
+          -F "document=@${file};filename=${upload_name};type=application/octet-stream"
+        )
+        if [ -n "$thread" ]; then
+          curl_args+=(-F "message_thread_id=$thread")
+        fi
+        if [ -n "$caption" ]; then
+          curl_args+=(--form-string "caption=$(telegram_truncate_caption "$caption")" --form-string "parse_mode=HTML")
+        fi
+        local resp
+        if ! resp="$(curl "${curl_args[@]}")"; then
+          printf '%s\n' "$resp" >&2
+          exit 1
+        fi
+        telegram_capture_message_ids "$resp"
+      }
+
+      send_documents_group() {
+        local thread=$1
+        local group_caption=${2:-}
+        shift 2
+        local files=("$@")
+        local uploadable=()
+        local file size name upload_name
+
+        if [ "${#files[@]}" -eq 0 ]; then
+          if [ -n "$group_caption" ]; then
+            send_message "$thread" "$group_caption"
+          fi
+          return 0
+        fi
+
+        for file in "${files[@]}"; do
+          size=$(stat -c%s "$file")
+          name=$(basename "$file")
+          if [ "$size" -gt "$TG_MAX_FILESIZE" ]; then
+            local msg
+            msg=$(printf '📦 %s (%sMB) exceeds Telegram upload limit.\n🔗 Download: %s' \
+              "$(telegram_html_escape "$name")" \
+              "$((size / 1024 / 1024))" \
+              "$(telegram_html_link "${OVERSIZE_LINK_URL:-$CI_PIPELINE_URL}" "${OVERSIZE_LINK_LABEL:-${CI_PIPELINE_ID:-pipeline}}")")
+            send_message "$thread" "$msg"
+            continue
+          fi
+          uploadable+=("$file")
+        done
+
+        if [ "${#uploadable[@]}" -eq 0 ]; then
+          if [ -n "$group_caption" ]; then
+            send_message "$thread" "$group_caption"
+          fi
+          return 0
+        fi
+
+        if [ "${#uploadable[@]}" -eq 1 ]; then
+          name=$(basename "${uploadable[0]}")
+          local single_caption
+          single_caption="$(telegram_html_escape "$name")"
+          if [ -n "$group_caption" ]; then
+            single_caption=$(printf '%s\n\n%s' "$single_caption" "$group_caption")
+          fi
+          send_document "${uploadable[0]}" "$thread" "$single_caption"
+          return 0
+        fi
+
+        local idx=0
+        local total=${#uploadable[@]}
+        local chunk_index=0
+        while [ "$idx" -lt "$total" ]; do
+          local chunk=("${uploadable[@]:idx:10}")
+          local media_items=()
+          local curl_args=(
+            --fail-with-body
+            -sS
+            -X POST
+            "$(telegram_api_url sendMediaGroup)"
+            -F "chat_id=${TG_CHAT_ID}"
+          )
+          if [ -n "$thread" ]; then
+            curl_args+=(-F "message_thread_id=$thread")
+          fi
+
+          local attach_group_caption=0
+          if [ "$chunk_index" -eq 0 ] && [ -n "$group_caption" ]; then
+            attach_group_caption=1
+          fi
+
+          local i=0
+          local caption_target=0
+          if [ "$attach_group_caption" -eq 1 ]; then
+            if [ "$TG_MEDIA_CAPTION_POSITION" = "first" ]; then
+              caption_target=1
+            else
+              caption_target=${#chunk[@]}
+            fi
+          fi
+
+          for file in "${chunk[@]}"; do
+            i=$((i + 1))
+            name=$(basename "$file")
+            upload_name=$(telegram_upload_name "$name")
+            local item_caption
+            item_caption="$(telegram_html_escape "$name")"
+            if [ "$attach_group_caption" -eq 1 ] && [ "$i" -eq "$caption_target" ]; then
+              item_caption=$(printf '%s\n\n%s' "$item_caption" "$group_caption")
+            fi
+            item_caption=$(telegram_truncate_caption "$item_caption")
+            media_items+=("$(printf '{"type":"document","media":"attach://file%d","caption":"%s","parse_mode":"HTML"}' "$i" "$(telegram_json_escape "$item_caption")")")
+            curl_args+=(-F "file${i}=@${file};filename=${upload_name};type=application/octet-stream")
+          done
+
+          local media_json
+          media_json="[$(IFS=,; printf '%s' "${media_items[*]}")]"
+          curl_args+=(--form-string "media=${media_json}")
+          echo "Sending media group with ${#chunk[@]} documents to Telegram..."
+          local resp
+          if ! resp="$(curl "${curl_args[@]}")"; then
+            printf '%s\n' "$resp" >&2
+            exit 1
+          fi
+          telegram_capture_message_ids "$resp"
+          idx=$((idx + ${#chunk[@]}))
+          chunk_index=$((chunk_index + 1))
+        done
+      }
+
+      ci_thread="${TG_CI_THREAD_ID:-${TG_GITLAB_THREAD_ID:-}}"
+      project_name="${MAGISK_TELEGRAM_PROJECT_NAME:-$CI_PROJECT_NAME}"
+      project_tag="${MAGISK_TELEGRAM_PROJECT_TAG:-#$CI_PROJECT_NAME}"
+      version_tag="$(telegram_version_hashtag)"
+      tag_line="${project_tag}${version_tag:+ $version_tag}"
+      commit_title="${CI_COMMIT_TITLE:-${CI_COMMIT_MESSAGE:-}}"
+      commit_title=$(printf %s "$commit_title" | head -n 1)
+      if [ -n "${CI_COMMIT_SHA:-}" ] && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+        source_commit_title="$(git log -1 --no-merges --format=%s "${CI_COMMIT_SHA}^2" 2>/dev/null || true)"
+        if [ -n "$source_commit_title" ]; then
+          commit_title="$source_commit_title"
+        fi
+      fi
+      OVERSIZE_LINK_URL="$CI_PIPELINE_URL"
+      OVERSIZE_LINK_LABEL="${CI_PIPELINE_ID:-pipeline}"
+
+      version_display="$(telegram_version_display)"
+      if [ -n "$version_display" ]; then
+        title_line="✅ $(telegram_html_escape "$project_name")：$(telegram_html_escape "$version_display")"
+      else
+        title_line="✅ $(telegram_html_escape "$project_name")"
+      fi
+      ci_msg="$title_line"
+      if [ -n "$tag_line" ]; then
+        ci_msg+=$'\n'"$(telegram_html_escape "$tag_line")"
+      fi
+      if [ -n "$commit_title" ]; then
+        ci_msg+=$'\n'"📋 $(telegram_html_link "$CI_PIPELINE_URL" "$commit_title")"
+      fi
+
+      artifact_patterns="${MAGISK_TELEGRAM_CI_ARTIFACT_PATTERNS:-${MAGISK_TELEGRAM_CI_ARTIFACT_PATTERN:-*arm64-v8a*.apk}}"
+      ci_artifacts_file="$(mktemp)"
+      while IFS= read -r artifact_pattern; do
+        [ -n "$artifact_pattern" ] || continue
+        find . -type f -name "$artifact_pattern" -print0
+      done <<< "$artifact_patterns" | sort -zu > "$ci_artifacts_file"
+      mapfile -d '' ci_artifacts < "$ci_artifacts_file"
+      rm -f "$ci_artifacts_file"
+      if [ "${#ci_artifacts[@]}" -eq 0 ]; then
+        echo "No Telegram CI artifacts matched configured patterns; skip text-only CI notify."
+        exit 0
+      fi
+
+      send_documents_group "$ci_thread" "$ci_msg" "${ci_artifacts[@]}"
+      telegram_pin_latest "$ci_thread" ci
+
+      MAGISK_TELEGRAM_CI_EOF
+      bash /tmp/magisk_telegram_ci.sh
+.magisk_telegram_release:
+  image: "alpine:3.22"
+  stage: release-publish
+  variables:
+    MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
+    MAGISK_TELEGRAM_PROJECT_NAME: "$CI_PROJECT_NAME"
+    MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERN: "*arm64-v8a*.apk"
+    MAGISK_TELEGRAM_RELEASE_NOTES_SOURCE: "docs/CHANGELOG.md"
+    MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
+  before_script:
+    - apk add --no-cache bash coreutils curl findutils git
+    - |
+      if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        echo "Python interpreter already present; skip install."
+      else
+        apk add --no-cache python3
+      fi
+    - |
+      # The rolling pin reads capture_ids.py from the pinned toolkit checkout.
+      ref="main"
+      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+        ref="$MAGISK_CI_TOOLKIT_REF"
+      fi
+      toolkit_dir="${MAGISK_CI_TOOLKIT_DIR:-$CI_PROJECT_DIR/.magisk-ci-toolkit}"
+      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      case "$toolkit_repository" in
+        https://gitlab.com/*)
+          if [ -n "${CI_JOB_TOKEN:-}" ]; then
+            toolkit_repository="https://gitlab-ci-token:${CI_JOB_TOKEN}@${toolkit_repository#https://}"
+          fi
+          ;;
+      esac
+      rm -rf "$toolkit_dir"
+      if git init --quiet "$toolkit_dir" \
+        && git -C "$toolkit_dir" remote add origin "$toolkit_repository" \
+        && git -C "$toolkit_dir" fetch --quiet --depth 1 origin "$ref" \
+        && git -C "$toolkit_dir" checkout --quiet --detach --force FETCH_HEAD; then
+        non_hex=0
+        case "$ref" in
+          ''|*[!0-9a-fA-F]*) non_hex=1 ;;
+        esac
+        if [ "$non_hex" -eq 0 ] && [ "${#ref}" -eq 40 ] \
+          && [ "$(git -C "$toolkit_dir" rev-parse HEAD)" != "$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')" ]; then
+          echo "resolved toolkit commit does not match pinned ref $ref; Telegram pin will be skipped" >&2
+          rm -rf "$toolkit_dir"
+        fi
+      else
+        echo "toolkit checkout failed; Telegram pin will be skipped" >&2
+        rm -rf "$toolkit_dir"
+      fi
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/'
+
+  after_script:
+    - |
+      set +e
+      apk add --no-cache bash curl python3 >/dev/null 2>&1 || true
+      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+        ref="$MAGISK_CI_TOOLKIT_REF"
+      else
+        ref="main"
+      fi
+      tmp="$(mktemp -d)"
+      if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
+        git init --quiet "$tmp/toolkit"
+        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
+          toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+          git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
+        fi
+        git -C "$tmp/toolkit" fetch --depth 1 origin "$ref" && git -C "$tmp/toolkit" checkout --detach --force FETCH_HEAD
+        if [ -x "$tmp/toolkit/ci/otel_export.sh" ]; then
+          export MAGISK_OTEL_SERVICE_NAME="${MAGISK_OTEL_SERVICE_NAME:-magisk-ci}"
+          bash "$tmp/toolkit/ci/otel_export.sh" "ci.telegram" "magisk.span_source=telegram_after_script"
+        fi
+      fi
+
+  script:
+    - |
+      cat > /tmp/magisk_telegram_release.sh <<'MAGISK_TELEGRAM_RELEASE_EOF'
+      set -euo pipefail
+      if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
+        echo "TG_BOT_TOKEN/TG_CHAT_ID not set, skip."
+        exit 0
+      fi
+      TG_API_BASE="${TG_API_BASE:-https://api.telegram.org}"
+      TG_API_BASE="${TG_API_BASE%/}"
+      TG_MAX_FILESIZE="${TG_MAX_FILESIZE:-$((50 * 1024 * 1024))}"
+      TG_MEDIA_CAPTION_POSITION="${TG_MEDIA_CAPTION_POSITION:-last}"
+      TG_MEDIA_CAPTION_MAX=1024
+
+      python_bin=""
+      if command -v python3 >/dev/null 2>&1; then
+        python_bin="python3"
+      elif command -v python >/dev/null 2>&1; then
+        python_bin="python"
+      fi
+
+      telegram_html_escape() {
+        local value=${1:-}
+        value=${value//&/\&amp;}
+        value=${value//</\&lt;}
+        value=${value//>/\&gt;}
+        value=${value//\"/\&quot;}
+        printf '%s' "$value"
+      }
+
+      telegram_html_link() {
+        local url=$1
+        local label=$2
+        if [ -z "$url" ]; then
+          telegram_html_escape "$label"
+          return
+        fi
+        printf '<a href="%s">%s</a>' "$(telegram_html_escape "$url")" "$(telegram_html_escape "$label")"
+      }
+
+      telegram_version_hashtag() {
+        local version="${MAGISK_TELEGRAM_VERSION_NAME:-}"
+        if [ -z "$version" ] && [ -f gradle/libs.versions.toml ]; then
+          version="$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]*=/{print $2; exit}' gradle/libs.versions.toml)"
+        fi
+        if [ -z "$version" ] && [ -f package.json ]; then
+          version="$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/{print $4; exit}' package.json)"
+        fi
+        if [ -z "$version" ]; then
+          version="${CI_COMMIT_TAG:-}"
+        fi
+        version="${version#v}"
+        version="${version#V}"
+        version="$(printf '%s' "$version" | sed -E 's/[^[:alnum:]_]+/_/g; s/^_+//; s/_+$//')"
+        [ -n "$version" ] && printf '#v%s' "$version"
+        return 0
+      }
+
+      telegram_json_escape() {
+        local value=${1:-}
+        value=${value//\\/\\\\}
+        value=${value//\"/\\\"}
+        value=${value//$'\n'/\\n}
+        value=${value//$'\r'/\\r}
+        value=${value//$'\t'/\\t}
+        printf '%s' "$value"
+      }
+
+      telegram_truncate_caption() {
+        local value=${1:-}
+        local input_file
+        input_file="$(mktemp)"
+        printf '%s' "$value" > "$input_file"
+        if [ -n "$python_bin" ]; then
+          "$python_bin" - "$input_file" "$TG_MEDIA_CAPTION_MAX" <<'PY'
+      import html
+      import pathlib
+      import sys
+      from html.parser import HTMLParser
+
+      source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+      limit = int(sys.argv[2])
+
+
+      class VisibleText(HTMLParser):
+          def __init__(self) -> None:
+              super().__init__(convert_charrefs=True)
+              self.parts: list[str] = []
+
+          def handle_data(self, data: str) -> None:
+              self.parts.append(data)
+
+
+      visible = VisibleText()
+      visible.feed(source)
+      if len("".join(visible.parts)) <= limit:
+          sys.stdout.write(source)
+          raise SystemExit(0)
+
+
+      class TruncateHtml(HTMLParser):
+          def __init__(self) -> None:
+              super().__init__(convert_charrefs=True)
+              self.remaining = limit
+              self.output: list[str] = []
+              self.open_tags: list[str] = []
+              self.done = False
+
+          def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+              if self.done:
+                  return
+              rendered_attrs = "".join(
+                  f' {name}="{html.escape(value or "", quote=True)}"' for name, value in attrs
+              )
+              self.output.append(f"<{tag}{rendered_attrs}>")
+              if tag not in {"br"}:
+                  self.open_tags.append(tag)
+
+          def handle_endtag(self, tag: str) -> None:
+              if self.done:
+                  return
+              self.output.append(f"</{tag}>")
+              if tag in self.open_tags:
+                  self.open_tags.remove(tag)
+
+          def handle_data(self, data: str) -> None:
+              if self.done or not data:
+                  return
+              if len(data) <= self.remaining:
+                  self.output.append(html.escape(data))
+                  self.remaining -= len(data)
+                  return
+              keep = max(self.remaining - 1, 0)
+              self.output.append(html.escape(data[:keep]) + "…")
+              self.remaining = 0
+              self.done = True
+
+          def finish(self) -> str:
+              self.output.extend(f"</{tag}>" for tag in reversed(self.open_tags))
+              return "".join(self.output)
+
+
+      truncated = TruncateHtml()
+      truncated.feed(source)
+      sys.stdout.write(truncated.finish())
+      PY
+        else
+          printf '%s…' "${value:0:$((TG_MEDIA_CAPTION_MAX - 1))}"
+        fi
+        rm -f "$input_file"
+      }
+
+      telegram_upload_name() {
+        local name=$1
+        local max_len=60
+        if [ "${#name}" -le "$max_len" ]; then
+          printf '%s' "$name"
+          return 0
+        fi
+        local ext=""
+        local stem=$name
+        if [[ "$name" == *.* ]]; then
+          ext=".${name##*.}"
+          stem="${name%.*}"
+        fi
+        local keep=$((max_len - ${#ext} - 2))
+        if [ "$keep" -lt 16 ]; then
+          printf '%s' "$name"
+          return 0
+        fi
+        local head_len=$((keep / 2))
+        local tail_len=$((keep - head_len))
+        printf '%s__%s%s' "${stem:0:head_len}" "${stem: -tail_len}" "$ext"
+      }
+
+      telegram_api_url() {
+        printf '%s/bot%s/%s' "$TG_API_BASE" "$TG_BOT_TOKEN" "$1"
+      }
+
+      # --- optional rolling pin (MAGISK_TELEGRAM_PIN=latest) ---
+      TELEGRAM_LAST_MESSAGE_IDS=""
+
+      telegram_capture_message_ids() {
+        local resp=${1:-}
+        [ -n "$resp" ] || return 0
+        local ids
+        ids=""
+        if [ -n "$python_bin" ] && [ -f "$MAGISK_CI_TOOLKIT_DIR/ci/capture_ids.py" ]; then
+          ids="$(printf '%s' "$resp" | "$python_bin" "$MAGISK_CI_TOOLKIT_DIR/ci/capture_ids.py" 2>/dev/null)" || {
+            echo "capture_ids failed; Telegram pin will be skipped" >&2
+            ids=""
+          }
+        fi
+        [ -n "$ids" ] || return 0
+        TELEGRAM_LAST_MESSAGE_IDS="$ids"
+      }
+
+      telegram_read_pin_var() {
+        local var_name=$1
+        local val=""
+        if [ -n "${GITLAB_API_TOKEN:-}" ] && [ -n "${CI_PROJECT_ID:-}" ]; then
+          val="$(curl -sS --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            "${CI_API_V4_URL:-https://gitlab.com/api/v4}/projects/$CI_PROJECT_ID/variables/$var_name" 2>/dev/null \
+            | sed -nE 's/.*"value":"?([^"]*)"?.*/\1/p' || true)"
+        fi
+        [ "$val" != "0" ] && [ -n "$val" ] && printf '%s' "$val" || true
+      }
+
+      telegram_write_pin_var() {
+        local var_name=$1 value=$2
+        [ -n "${GITLAB_API_TOKEN:-}" ] && [ -n "${CI_PROJECT_ID:-}" ] || return 0
+        local api="${CI_API_V4_URL:-https://gitlab.com/api/v4}"
+        local rc
+        rc="$(curl -sS -o /dev/null -w '%{http_code}' --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+          "$api/projects/$CI_PROJECT_ID/variables/$var_name" 2>/dev/null || true)"
+        if [ "$rc" = "200" ]; then
+          curl -sS -X PUT --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            "$api/projects/$CI_PROJECT_ID/variables/$var_name" \
+            --form "value=$value" >/dev/null 2>&1 || true
+        else
+          curl -sS -X POST --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            "$api/projects/$CI_PROJECT_ID/variables" \
+            --form "key=$var_name" --form "value=$value" >/dev/null 2>&1 || true
+        fi
+      }
+
+      telegram_pin_latest() {
+        [ "${MAGISK_TELEGRAM_PIN:-latest}" = "latest" ] || return 0
+        local message_ids=${TELEGRAM_LAST_MESSAGE_IDS:-}
+        if [ -z "$message_ids" ]; then
+          echo "MAGISK_TELEGRAM_PIN=latest but no message id was captured; nothing to pin."
+          return 0
+        fi
+        local pin_type=${2:-ci}
+        local var_name="TG_LAST_$(printf '%s' "$pin_type" | tr '[:lower:]' '[:upper:]')_PIN_ID"
+
+        # Read previous pin IDs from CI variable (cross-pipeline safe)
+        local old_ids=""
+        old_ids="$(telegram_read_pin_var "$var_name")"
+
+        local thread="${1:-}"
+        local any_failed=0
+
+        # Pin every message in the group
+        local mid
+        for mid in $(printf '%s' "$message_ids" | tr ',' ' '); do
+          local pin_args=(-d "chat_id=${TG_CHAT_ID}" -d "message_id=${mid}" -d "disable_notification=true")
+          if [ -n "$thread" ]; then
+            pin_args+=(-d "message_thread_id=$thread")
+          fi
+          local pin_resp
+          pin_resp="$(curl -sS -X POST "$(telegram_api_url pinChatMessage)" "${pin_args[@]}" 2>&1)" || true
+          if ! printf '%s' "$pin_resp" | grep -q '"ok":true'; then
+            echo "Telegram pinChatMessage failed for $mid: $pin_resp" >&2
+            any_failed=1
+          fi
+        done
+
+        if [ "$any_failed" -eq 1 ]; then
+          echo "Some pins failed; keeping previous pinned messages."
+          return 0
+        fi
+
+        # Unpin all previous same-type pins
+        if [ -n "$old_ids" ]; then
+          for mid in $(printf '%s' "$old_ids" | tr ',' ' '); do
+            # Skip if this ID is already in the new set
+            if printf '%s' ",$message_ids," | grep -q ",$mid,"; then
+              continue
+            fi
+            local unpin_args=(-d "chat_id=${TG_CHAT_ID}" -d "message_id=$mid")
+            if [ -n "$thread" ]; then
+              unpin_args+=(-d "message_thread_id=$thread")
+            fi
+            local unpin_resp
+            unpin_resp="$(curl -sS -X POST "$(telegram_api_url unpinChatMessage)" "${unpin_args[@]}" 2>&1)" || true
+            if ! printf '%s' "$unpin_resp" | grep -q '"ok":true'; then
+              echo "Telegram unpinChatMessage failed for $mid: $unpin_resp" >&2
+            fi
+          done
+        fi
+
+        # Store new pin IDs for next run
+        telegram_write_pin_var "$var_name" "$message_ids"
+      }
+
+      send_message() {
+        local thread=$1
+        local text=$2
+        local curl_args=(
+          --fail-with-body
+          -sS
+          -X POST
+          "$(telegram_api_url sendMessage)"
+          -d "chat_id=${TG_CHAT_ID}"
+          --data-urlencode "text=${text}"
+          -d "parse_mode=HTML"
+          -d "disable_web_page_preview=true"
+        )
+        if [ -n "$thread" ]; then
+          curl_args+=(-d "message_thread_id=$thread")
+        fi
+        local resp
+        if ! resp="$(curl "${curl_args[@]}")"; then
+          printf '%s\n' "$resp" >&2
+          exit 1
+        fi
+        telegram_capture_message_ids "$resp"
+      }
+
+      send_document() {
+        local file=$1
+        local thread=$2
+        local caption=$3
+        local size name upload_name
+        size=$(stat -c%s "$file")
+        name=$(basename "$file")
+        upload_name=$(telegram_upload_name "$name")
+        if [ "$size" -gt "$TG_MAX_FILESIZE" ]; then
+          local msg
+          msg=$(printf '📦 %s (%sMB) exceeds Telegram upload limit.\n🔗 Download: %s' \
+            "$(telegram_html_escape "$name")" \
+            "$((size / 1024 / 1024))" \
+            "$(telegram_html_link "${OVERSIZE_LINK_URL:-$CI_PIPELINE_URL}" "${OVERSIZE_LINK_LABEL:-${CI_PIPELINE_ID:-pipeline}}")")
+          send_message "$thread" "$msg"
+          return 0
+        fi
+        local curl_args=(
+          --fail-with-body
+          -sS
+          -X POST
+          "$(telegram_api_url sendDocument)"
+          -F "chat_id=${TG_CHAT_ID}"
+          -F "document=@${file};filename=${upload_name};type=application/octet-stream"
+        )
+        if [ -n "$thread" ]; then
+          curl_args+=(-F "message_thread_id=$thread")
+        fi
+        if [ -n "$caption" ]; then
+          curl_args+=(--form-string "caption=$(telegram_truncate_caption "$caption")" --form-string "parse_mode=HTML")
+        fi
+        local resp
+        if ! resp="$(curl "${curl_args[@]}")"; then
+          printf '%s\n' "$resp" >&2
+          exit 1
+        fi
+        telegram_capture_message_ids "$resp"
+      }
+
+      send_documents_group() {
+        local thread=$1
+        local group_caption=${2:-}
+        shift 2
+        local files=("$@")
+        local uploadable=()
+        local file size name upload_name
+
+        if [ "${#files[@]}" -eq 0 ]; then
+          if [ -n "$group_caption" ]; then
+            send_message "$thread" "$group_caption"
+          fi
+          return 0
+        fi
+
+        for file in "${files[@]}"; do
+          size=$(stat -c%s "$file")
+          name=$(basename "$file")
+          if [ "$size" -gt "$TG_MAX_FILESIZE" ]; then
+            local msg
+            msg=$(printf '📦 %s (%sMB) exceeds Telegram upload limit.\n🔗 Download: %s' \
+              "$(telegram_html_escape "$name")" \
+              "$((size / 1024 / 1024))" \
+              "$(telegram_html_link "${OVERSIZE_LINK_URL:-$CI_PIPELINE_URL}" "${OVERSIZE_LINK_LABEL:-${CI_PIPELINE_ID:-pipeline}}")")
+            send_message "$thread" "$msg"
+            continue
+          fi
+          uploadable+=("$file")
+        done
+
+        if [ "${#uploadable[@]}" -eq 0 ]; then
+          if [ -n "$group_caption" ]; then
+            send_message "$thread" "$group_caption"
+          fi
+          return 0
+        fi
+
+        if [ "${#uploadable[@]}" -eq 1 ]; then
+          name=$(basename "${uploadable[0]}")
+          local single_caption
+          single_caption="$(telegram_html_escape "$name")"
+          if [ -n "$group_caption" ]; then
+            single_caption=$(printf '%s\n\n%s' "$single_caption" "$group_caption")
+          fi
+          send_document "${uploadable[0]}" "$thread" "$single_caption"
+          return 0
+        fi
+
+        local idx=0
+        local total=${#uploadable[@]}
+        local chunk_index=0
+        while [ "$idx" -lt "$total" ]; do
+          local chunk=("${uploadable[@]:idx:10}")
+          local media_items=()
+          local curl_args=(
+            --fail-with-body
+            -sS
+            -X POST
+            "$(telegram_api_url sendMediaGroup)"
+            -F "chat_id=${TG_CHAT_ID}"
+          )
+          if [ -n "$thread" ]; then
+            curl_args+=(-F "message_thread_id=$thread")
+          fi
+
+          local attach_group_caption=0
+          if [ "$chunk_index" -eq 0 ] && [ -n "$group_caption" ]; then
+            attach_group_caption=1
+          fi
+
+          local i=0
+          local caption_target=0
+          if [ "$attach_group_caption" -eq 1 ]; then
+            if [ "$TG_MEDIA_CAPTION_POSITION" = "first" ]; then
+              caption_target=1
+            else
+              caption_target=${#chunk[@]}
+            fi
+          fi
+
+          for file in "${chunk[@]}"; do
+            i=$((i + 1))
+            name=$(basename "$file")
+            upload_name=$(telegram_upload_name "$name")
+            local item_caption
+            item_caption="$(telegram_html_escape "$name")"
+            if [ "$attach_group_caption" -eq 1 ] && [ "$i" -eq "$caption_target" ]; then
+              item_caption=$(printf '%s\n\n%s' "$item_caption" "$group_caption")
+            fi
+            item_caption=$(telegram_truncate_caption "$item_caption")
+            media_items+=("$(printf '{"type":"document","media":"attach://file%d","caption":"%s","parse_mode":"HTML"}' "$i" "$(telegram_json_escape "$item_caption")")")
+            curl_args+=(-F "file${i}=@${file};filename=${upload_name};type=application/octet-stream")
+          done
+
+          local media_json
+          media_json="[$(IFS=,; printf '%s' "${media_items[*]}")]"
+          curl_args+=(--form-string "media=${media_json}")
+          echo "Sending media group with ${#chunk[@]} documents to Telegram..."
+          local resp
+          if ! resp="$(curl "${curl_args[@]}")"; then
+            printf '%s\n' "$resp" >&2
+            exit 1
+          fi
+          telegram_capture_message_ids "$resp"
+          idx=$((idx + ${#chunk[@]}))
+          chunk_index=$((chunk_index + 1))
+        done
+      }
+
+      release_thread="${TG_THREAD_ID:-${TG_GITLAB_RELEASE_THREAD_ID:-}}"
+      project_name="${MAGISK_TELEGRAM_PROJECT_NAME:-$CI_PROJECT_NAME}"
+      project_tag="${MAGISK_TELEGRAM_PROJECT_TAG:-#$CI_PROJECT_NAME}"
+      version_tag="$(telegram_version_hashtag)"
+      tag_line="${project_tag}${version_tag:+ $version_tag}"
+      release_tag="${CI_COMMIT_TAG:-manual}"
+      release_url="${CI_PROJECT_URL}/-/releases/${release_tag}"
+      release_notes_source="${MAGISK_TELEGRAM_RELEASE_NOTES_SOURCE:-docs/CHANGELOG.md}"
+      release_notes_file="$(mktemp)"
+      release_notes_content=""
+      changelog_url=""
+      OVERSIZE_LINK_URL="$CI_PIPELINE_URL"
+      OVERSIZE_LINK_LABEL="${CI_COMMIT_TAG:-pipeline}"
+
+      if [ -f "$release_notes_source" ] && awk -v version="$release_tag" '
+        $0 == "---" && found { exit }
+        found { print; next }
+        index($0, "## [" version "]") == 1 { found = 1; print; next }
+        END { if (!found) exit 1 }
+      ' "$release_notes_source" > "$release_notes_file"; then
+        release_notes_content="$(cat "$release_notes_file")"
+      else
+        release_notes_content="Release notes not found in ${release_notes_source} for ${release_tag}."
+      fi
+      rm -f "$release_notes_file"
+
+      changelog_url="$(printf '%s\n' "$release_notes_content" | sed -nE 's#^[[:space:]]*>?[[:space:]]*Full Changelog:[[:space:]]*(https?://[^[:space:]]+).*$#\1#p' | head -n 1)"
+      if [ -n "$changelog_url" ]; then
+        release_notes_content="$(printf '%s\n' "$release_notes_content" | sed -E '/^[[:space:]]*>?[[:space:]]*Full Changelog:/d')"
+      fi
+
+      max_notes_len=3000
+      if [ "${#release_notes_content}" -gt "$max_notes_len" ]; then
+        release_notes_content=$(printf '%s\n...' "${release_notes_content:0:max_notes_len}")
+      fi
+
+      play_url="${MAGISK_TELEGRAM_RELEASE_PLAY_URL:-${MAGISK_ANDROID_RELEASE_PLAY_URL:-}}"
+      if [ -z "$play_url" ] && [ -n "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:-}" ]; then
+        play_url="https://play.google.com/store/apps/details?id=${MAGISK_ANDROID_RELEASE_PACKAGE_NAME}"
+      fi
+      play_line=""
+      if [ "${MAGISK_ANDROID_RELEASE_SHOW_PLAY_LINK:-true}" = "true" ] && [ -n "$play_url" ]; then
+        play_line=$(printf '\n🔗 Play: %s' \
+          "$(telegram_html_link "$play_url" "${MAGISK_TELEGRAM_RELEASE_PLAY_LABEL:-Google Play}")")
+      fi
+
+      release_commit_title="${CI_COMMIT_TITLE:-${CI_COMMIT_MESSAGE:-}}"
+      release_commit_title="$(printf %s "$release_commit_title" | head -n 1)"
+
+      release_head="📦 $(telegram_html_escape "$project_name")：$(telegram_html_link "$release_url" "$release_tag")"
+      if [ -n "$tag_line" ]; then
+        release_head+=$'\n'"$(telegram_html_escape "$tag_line")"
+      fi
+      if [ -n "$release_commit_title" ]; then
+        release_head+=$'\n'"📋 $(telegram_html_link "$CI_PIPELINE_URL" "$release_commit_title")"
+      fi
+      release_head+="$play_line"
+      release_msg="$release_head"
+      if [ -n "$release_notes_content" ]; then
+        release_msg+=$'\n\n'"$(telegram_html_escape "$release_notes_content")"
+      fi
+
+      artifact_patterns="${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERNS:-${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERN:-*arm64-v8a*.apk}}"
+      release_artifacts_file="$(mktemp)"
+      while IFS= read -r artifact_pattern; do
+        [ -n "$artifact_pattern" ] || continue
+        find . -type f -name "$artifact_pattern" -print0
+      done <<< "$artifact_patterns" | sort -zu > "$release_artifacts_file"
+      mapfile -d '' release_artifacts < "$release_artifacts_file"
+      rm -f "$release_artifacts_file"
+      if [ "${#release_artifacts[@]}" -eq 0 ]; then
+        echo "No Telegram release artifacts matched configured patterns."
+        send_message "$release_thread" "$release_msg"
+      else
+        send_documents_group "$release_thread" "$release_msg" "${release_artifacts[@]}"
+      fi
+      telegram_pin_latest "$release_thread" release
+      MAGISK_TELEGRAM_RELEASE_EOF
+      bash /tmp/magisk_telegram_release.sh
+
+.magisk_telegram_images:
+  image: "alpine:3.22"
+  stage: notify
+  allow_failure: true
+  variables:
+    MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
+    MAGISK_TELEGRAM_PROJECT_NAME: "$CI_PROJECT_NAME"
+    MAGISK_TELEGRAM_IMAGE_EVENT: "docker"
+    MAGISK_TELEGRAM_PLATFORMS: "linux/amd64, linux/arm64"
+    MAGISK_TELEGRAM_CI_BRANCH: "beta"
+    # One of: MAGISK_TELEGRAM_IMAGES | IMAGE_REPOS+IMAGE_TAGS | IMAGE_LIST_COMMAND
+    MAGISK_TELEGRAM_IMAGES: ""
+    MAGISK_TELEGRAM_IMAGE_REPOS: ""
+    MAGISK_TELEGRAM_IMAGE_TAGS: ""
+    MAGISK_TELEGRAM_IMAGE_LIST_COMMAND: ""
+    # Require dotenv signal from the successful publish/manifest job (see consumers).
+    MAGISK_TELEGRAM_REQUIRE_PUBLISH_OK: "true"
+    MAGISK_TELEGRAM_IMAGE_PUBLISH_OK: ""
+  rules:
+    # Never notify on failed pipelines/jobs; consumers must also needs: publish
+    # jobs without optional: true so build failures skip this job entirely.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
+  before_script:
+    - apk add --no-cache bash coreutils curl git
+    - |
+      if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        echo "Python interpreter already present; skip install."
+      else
+        apk add --no-cache python3
+      fi
+  after_script:
+    - |
+      set +e
+      apk add --no-cache bash curl python3 >/dev/null 2>&1 || true
+      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+        ref="$MAGISK_CI_TOOLKIT_REF"
+      else
+        ref="main"
+      fi
+      tmp="$(mktemp -d)"
+      if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
+        git init --quiet "$tmp/toolkit"
+        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
+          toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+          git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
+        fi
+        git -C "$tmp/toolkit" fetch --depth 1 origin "$ref" && git -C "$tmp/toolkit" checkout --detach --force FETCH_HEAD
+        if [ -x "$tmp/toolkit/ci/otel_export.sh" ]; then
+          export MAGISK_OTEL_SERVICE_NAME="${MAGISK_OTEL_SERVICE_NAME:-magisk-ci}"
+          bash "$tmp/toolkit/ci/otel_export.sh" "ci.telegram" "magisk.span_source=telegram_images_after_script"
+        fi
+      fi
+  script:
+    - |
+      set -euo pipefail
+      if [ -z "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+        echo "MAGISK_CI_TOOLKIT_REF is required for .magisk_telegram_images" >&2
+        exit 2
+      fi
+      tmp="$(mktemp -d)"
+      git init --quiet "$tmp/toolkit"
+      git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
+        toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+        git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
+      fi
+      git -C "$tmp/toolkit" fetch --depth 1 origin "$MAGISK_CI_TOOLKIT_REF"
+      git -C "$tmp/toolkit" checkout --detach --force FETCH_HEAD
+      if [ -n "${MAGISK_CI_TOOLKIT_REF}" ] && [[ "${MAGISK_CI_TOOLKIT_REF}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        resolved="$(git -C "$tmp/toolkit" rev-parse HEAD)"
+        expected="$(printf '%s' "$MAGISK_CI_TOOLKIT_REF" | tr '[:upper:]' '[:lower:]')"
+        if [ "$resolved" != "$expected" ]; then
+          echo "resolved toolkit commit $resolved does not match pinned ref $MAGISK_CI_TOOLKIT_REF" >&2
+          exit 1
+        fi
+      fi
+      bash "$tmp/toolkit/ci/telegram_send_image_list.sh"

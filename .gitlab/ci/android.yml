@@ -1,0 +1,400 @@
+# Reusable GitLab CI templates for Android Gradle projects.
+#
+# Consumer projects should include this file from the magisk-ci-toolkit project
+# and define concrete jobs with `extends`.
+
+.magisk_android_base:
+  image: "eclipse-temurin:26-jdk"
+  resource_group: ${MAGISK_GRADLE_RESOURCE_GROUP:-android-gradle-build}
+  variables:
+    GET_SOURCES_ATTEMPTS: "3"
+    ANDROID_HOME: "$CI_PROJECT_DIR/.android-sdk"
+    ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+    GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+    GRADLE_OPTS: "-Dorg.gradle.warning.mode=all -Dorg.gradle.workers.max=2"
+    MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
+    MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/magisk-ci-toolkit.git"
+    MAGISK_OTEL_EXPORT: "1"
+    MAGISK_OTEL_SERVICE_NAME: "magisk-ci"
+    MAGISK_OTEL_ENDPOINT: "https://136325658.otel.gitlab-o11y.com:14318/v1/traces"
+  hooks:
+    pre_get_sources_script:
+      # GitLab source fetches occasionally reset HTTP/2 connections on this runner.
+      - git config --global http.version "HTTP/1.1"
+  before_script:
+    - |
+      set -euo pipefail
+
+      : "${MAGISK_ANDROID_SDKMANAGER_CHANNEL:=0}"
+      : "${MAGISK_ANDROID_COMPILE_SDK:=}"
+      : "${MAGISK_ANDROID_COMPILE_SDK_PACKAGE:=}"
+      : "${MAGISK_ANDROID_SDK_PACKAGES:=platform-tools}"
+      : "${MAGISK_CI_TOOLKIT_REF:=main}"
+      # Google ships the Android CLI (android sdk ...) only for linux/x86_64;
+      # cmdline-tools >= 23 also makes sdkmanager a stub that execs the CLI.
+      # Standalone sdkmanager lives in the older cmdline-tools (19.0 here) and
+      # runs on every architecture, so non-x86_64 bootstraps use it directly.
+      magisk_standalone_cmdline_tools="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
+      if [ "$(uname -m)" = "x86_64" ]; then
+        : "${MAGISK_ANDROID_COMMANDLINE_TOOLS_URL:=https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip}"
+      else
+        : "${MAGISK_ANDROID_COMMANDLINE_TOOLS_URL:=$magisk_standalone_cmdline_tools}"
+      fi
+
+      export DEBIAN_FRONTEND=noninteractive
+      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
+      if [[ "$use_mirror" == "true" && ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+        # debian:trixie-slim needs a one-time CA bootstrap before HTTPS mirrors work.
+        apt-get -o APT::Update::Error-Mode=any update
+        apt-get install -y --no-install-recommends ca-certificates
+        rm -rf /var/lib/apt/lists/*
+      fi
+      if [[ "$use_mirror" == "true" ]]; then
+        sed -i \
+          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
+          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
+          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+      fi
+      if [[ "$use_mirror" == "true" ]]; then
+        if ! apt-get -o APT::Update::Error-Mode=any update; then
+          echo "Mirror apt-get update failed, falling back to official sources" >&2
+          sed -i \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
+            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          apt-get -o APT::Update::Error-Mode=any update
+        fi
+      else
+        apt-get -o APT::Update::Error-Mode=any update
+      fi
+      apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+        python3 \
+        ripgrep \
+        unzip
+      rm -rf /var/lib/apt/lists/*
+
+      mkdir -p "$ANDROID_HOME"
+      android_cli="$ANDROID_HOME/cmdline-tools/latest/bin/android"
+      sdkmanager_cli="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+      # Bootstrap only when the SDK has neither front-end; a concurrent sibling
+      # job may have installed one while we waited, hence the lock + re-check.
+      if [ ! -x "$android_cli" ] && [ ! -x "$sdkmanager_cli" ]; then
+        mkdir -p "$ANDROID_HOME/cmdline-tools"
+        exec 9>"$ANDROID_HOME/cmdline-tools/.bootstrap.lock" 2>/dev/null || true
+        flock 9 2>/dev/null || true
+        if [ ! -x "$android_cli" ] && [ ! -x "$sdkmanager_cli" ]; then
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL "$MAGISK_ANDROID_COMMANDLINE_TOOLS_URL" -o "$tmp_dir/cmdline-tools.zip"
+          unzip -q "$tmp_dir/cmdline-tools.zip" -d "$tmp_dir"
+          rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+          mv "$tmp_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          rm -rf "$tmp_dir"
+        fi
+        flock -u 9 2>/dev/null || true
+      fi
+
+      export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+
+      compile_sdk="$MAGISK_ANDROID_COMPILE_SDK"
+      if [ -z "$compile_sdk" ] && [ -f gradle/libs.versions.toml ]; then
+        compile_sdk="$(sed -n 's/^compileSdk[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' gradle/libs.versions.toml | head -n 1)"
+      fi
+      compile_sdk="${compile_sdk#android-}"
+
+      normalize_android_platform_alias() {
+        if [ -z "$compile_sdk" ]; then
+          return 0
+        fi
+
+        platform_dir="$ANDROID_HOME/platforms/android-${compile_sdk}"
+        if [ ! -d "$platform_dir" ]; then
+          return 0
+        fi
+
+        for metadata_file in "$platform_dir/source.properties" "$platform_dir/package.xml"; do
+          if [ -f "$metadata_file" ]; then
+            sed -i \
+              -e "s/^AndroidVersion.ApiLevel=${compile_sdk}\\.0$/AndroidVersion.ApiLevel=${compile_sdk}/" \
+              -e "s#platforms;android-${compile_sdk}\\.0#platforms;android-${compile_sdk}#g" \
+              "$metadata_file"
+          fi
+        done
+      }
+
+      sdk_packages=()
+      if [ -n "$MAGISK_ANDROID_COMPILE_SDK_PACKAGE" ]; then
+        sdk_packages+=("$MAGISK_ANDROID_COMPILE_SDK_PACKAGE")
+      elif [ -n "$compile_sdk" ]; then
+        sdk_packages+=("platforms;android-${compile_sdk}")
+      fi
+      for package in $MAGISK_ANDROID_SDK_PACKAGES; do
+        sdk_packages+=("$package")
+      done
+
+      normalize_android_platform_alias
+
+      missing_packages=()
+      if [ "${#sdk_packages[@]}" -gt 0 ]; then
+        sdk_package_installed() {
+          case "$1" in
+            "platforms/"*) local_dir="$ANDROID_HOME/platforms/${1#platforms/}" ;;
+            "platforms;"*) local_dir="$ANDROID_HOME/platforms/${1#platforms;}" ;;
+            "build-tools/"*) local_dir="$ANDROID_HOME/build-tools/${1#build-tools/}" ;;
+            "build-tools;"*) local_dir="$ANDROID_HOME/build-tools/${1#build-tools;}" ;;
+            platform-tools) local_dir="$ANDROID_HOME/platform-tools" ;;
+            "cmdline-tools/"*) local_dir="$ANDROID_HOME/cmdline-tools/${1#cmdline-tools/}" ;;
+            "cmdline-tools;"*) local_dir="$ANDROID_HOME/cmdline-tools/${1#cmdline-tools;}" ;;
+            "ndk/"*) local_dir="$ANDROID_HOME/ndk/${1#ndk/}" ;;
+            "ndk;"*) local_dir="$ANDROID_HOME/ndk/${1#ndk;}" ;;
+            *) return 1 ;;
+          esac
+          [ -d "$local_dir" ] || return 1
+          [ -f "$local_dir/source.properties" ] || [ -f "$local_dir/package.xml" ] || return 1
+        }
+
+        # sdkmanager takes semicolon-separated package ids (platforms;android-37.2);
+        # the android CLI takes slash ids, converted at install time per front-end.
+        for package in "${sdk_packages[@]}"; do
+          if sdk_package_installed "$package"; then
+            echo "SDK package already installed locally: $package"
+          else
+            missing_packages+=("$package")
+          fi
+        done
+      fi
+
+      if [ "${#missing_packages[@]}" -eq 0 ]; then
+        echo "All required SDK packages are present locally; skip network operations."
+      else
+        # Accept all SDK licenses up-front by writing the known license hashes.
+        mkdir -p "$ANDROID_HOME/licenses"
+        printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee' > "$ANDROID_HOME/licenses/android-sdk-license"
+        printf '\n84831b9409646a918e30573bab4c9c91346d8abd' > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+        printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' > "$ANDROID_HOME/licenses/intel-android-extra-license"
+        printf '\n33b6a2e1e8a20e8d28c8e2a7927d7e8c8f93b1b7' > "$ANDROID_HOME/licenses/android-googletv-license"
+
+        # Decide at runtime which front-end can actually execute here: the CLI
+        # on x86_64, otherwise the Java sdkmanager. A stale cmdline-tools >= 23
+        # (stub sdkmanager + x86_64-only CLI on other arches) self-heals by
+        # installing the standalone cmdline-tools under the shared lock.
+        magisk_pick_tool() {
+          if [ -x "$android_cli" ] && "$android_cli" --version >/dev/null 2>&1; then
+            echo cli
+          else
+            # cmdline-tools >= 23 sdkmanager is a stub that execs the (x86_64-only)
+            # CLI and reports its version as "N (Android CLI)"; reject it unless the
+            # CLI actually runs, leaving only a real standalone sdkmanager (e.g. 19.0).
+            sm_ver="$("$sdkmanager_cli" --sdk_root="$ANDROID_HOME" --version 2>/dev/null)" || sm_ver=""
+            case "$sm_ver" in
+              *"(Android CLI)"*) echo none ;;
+              *) grep -qE '^[0-9]+' <<<"$sm_ver" && echo sdkmanager || echo none ;;
+            esac
+          fi
+        }
+        MAGISK_ANDROID_TOOL="$(magisk_pick_tool)"
+        if [ "$MAGISK_ANDROID_TOOL" = none ]; then
+          exec 9>"$ANDROID_HOME/cmdline-tools/.bootstrap.lock" 2>/dev/null || true
+          flock 9 2>/dev/null || true
+          MAGISK_ANDROID_TOOL="$(magisk_pick_tool)"
+          if [ "$MAGISK_ANDROID_TOOL" = none ]; then
+            tmp_dir="$(mktemp -d)"
+            curl -fsSL "$magisk_standalone_cmdline_tools" -o "$tmp_dir/cmdline-tools.zip"
+            unzip -q "$tmp_dir/cmdline-tools.zip" -d "$tmp_dir"
+            rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+            mv "$tmp_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            rm -rf "$tmp_dir"
+            MAGISK_ANDROID_TOOL="$(magisk_pick_tool)"
+          fi
+          flock -u 9 2>/dev/null || true
+        fi
+        if [ "$MAGISK_ANDROID_TOOL" = none ]; then
+          echo "No usable Android SDK front-end after bootstrap (need android CLI or sdkmanager)." >&2
+          exit 1
+        fi
+        echo "Android SDK front-end: $MAGISK_ANDROID_TOOL"
+
+        # Beta channel packages (e.g. android-37.2-beta3) need an opt-in flag.
+        install_args=()
+        if [ "$MAGISK_ANDROID_SDKMANAGER_CHANNEL" -ge 3 ] 2>/dev/null; then
+          if [ "$MAGISK_ANDROID_TOOL" = cli ]; then
+            install_args+=(--beta)
+          else
+            install_args+=(--channel=1)
+          fi
+        fi
+
+        sdk_install() {
+          echo "Installing SDK packages ($MAGISK_ANDROID_TOOL): $*"
+          if [ "$MAGISK_ANDROID_TOOL" = cli ]; then
+            cli_packages=()
+            for p in "$@"; do cli_packages+=("${p//;\//}"); done
+            "$android_cli" --sdk="$ANDROID_HOME" \
+              sdk install "${cli_packages[@]}" "${install_args[@]+"${install_args[@]}"}"
+          else
+            rc=0
+            yes 2>/dev/null | "$sdkmanager_cli" --sdk_root="$ANDROID_HOME" \
+              "${install_args[@]+"${install_args[@]}"}" "$@" || rc=$?
+            # 141 = SIGPIPE from `yes` once sdkmanager exits clean.
+            [ "$rc" -eq 141 ] && rc=0
+            return "$rc"
+          fi
+        }
+
+        install_ok=0
+        for attempt in 1 2 3 4; do
+          echo "SDK install attempt $attempt/4: ${missing_packages[*]}"
+          if sdk_install "${missing_packages[@]}"; then
+            install_ok=1
+            break
+          fi
+          echo "SDK install attempt $attempt failed."
+          [ "$attempt" -lt 4 ] && sleep 10
+        done
+
+        if [ "$install_ok" -ne 1 ]; then
+          echo "Failed to install SDK packages after 4 attempts." >&2
+          exit 1
+        fi
+      fi
+
+      normalize_android_platform_alias
+
+      # toolkit-checkout-contract:start
+      if [ ! -d "$MAGISK_CI_TOOLKIT_DIR/.git" ]; then
+        rm -rf "$MAGISK_CI_TOOLKIT_DIR"
+        git init --quiet "$MAGISK_CI_TOOLKIT_DIR"
+        git -C "$MAGISK_CI_TOOLKIT_DIR" remote add origin "$MAGISK_CI_TOOLKIT_REPOSITORY"
+      elif git -C "$MAGISK_CI_TOOLKIT_DIR" remote get-url origin >/dev/null 2>&1; then
+        git -C "$MAGISK_CI_TOOLKIT_DIR" remote set-url origin "$MAGISK_CI_TOOLKIT_REPOSITORY"
+      else
+        git -C "$MAGISK_CI_TOOLKIT_DIR" remote add origin "$MAGISK_CI_TOOLKIT_REPOSITORY"
+      fi
+      toolkit_repository_auth="$MAGISK_CI_TOOLKIT_REPOSITORY"
+      if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$MAGISK_CI_TOOLKIT_REPOSITORY" == https://gitlab.com/* ]]; then
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
+        git -C "$MAGISK_CI_TOOLKIT_DIR" remote set-url origin "$toolkit_repository_auth"
+      fi
+      git -C "$MAGISK_CI_TOOLKIT_DIR" fetch --depth 1 origin "$MAGISK_CI_TOOLKIT_REF"
+      git -C "$MAGISK_CI_TOOLKIT_DIR" checkout --detach --force FETCH_HEAD
+      if [[ "$MAGISK_CI_TOOLKIT_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        resolved_toolkit_ref="$(git -C "$MAGISK_CI_TOOLKIT_DIR" rev-parse HEAD)"
+        normalized_toolkit_ref="$(printf '%s' "$MAGISK_CI_TOOLKIT_REF" | tr '[:upper:]' '[:lower:]')"
+        if [ "$resolved_toolkit_ref" != "$normalized_toolkit_ref" ]; then
+          echo "resolved toolkit commit $resolved_toolkit_ref does not match pinned ref $MAGISK_CI_TOOLKIT_REF" >&2
+          exit 1
+        fi
+      fi
+      # toolkit-checkout-contract:end
+      # Sync shared version catalog from build-logic submodule.
+      # The developer's local copy may be stale if the submodule pointer
+      # was bumped without re-running the sync script.
+      if [ -f "$CI_PROJECT_DIR/build-logic/scripts/merge_catalogs.py" ]; then
+        python3 "$CI_PROJECT_DIR/build-logic/scripts/merge_catalogs.py" \
+          "$CI_PROJECT_DIR/build-logic/shared/gradle/libs.versions.toml" \
+          "$CI_PROJECT_DIR/gradle/libs.versions.toml"
+      fi
+      chmod +x ./gradlew
+      chmod +x "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh"
+      if [ "$(uname -m)" = "aarch64" ]; then
+        chmod +x "$MAGISK_CI_TOOLKIT_DIR/android/install_arm_android_tools.sh"
+        # Source the helper so its AGP AAPT2 override remains in this job's
+        # shell and is inherited by all subsequent Gradle invocations.
+        . "$MAGISK_CI_TOOLKIT_DIR/android/install_arm_android_tools.sh"
+      fi
+
+  after_script:
+    - |
+      set +e
+      if [ -x "${MAGISK_CI_TOOLKIT_DIR:-}/ci/otel_export.sh" ]; then
+        bash "$MAGISK_CI_TOOLKIT_DIR/ci/otel_export.sh" "ci.job"           "magisk.toolkit_ref=${MAGISK_CI_TOOLKIT_REF:-}"           "magisk.span_source=android_base_after_script"
+      else
+        echo "otel: helper missing, skip"
+      fi
+
+
+.magisk_android_build:
+  extends: .magisk_android_base
+  stage: build
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
+      if [ -z "${MAGISK_ANDROID_BUILD_TASKS:-}" ]; then
+        echo "MAGISK_ANDROID_BUILD_TASKS is required" >&2
+        exit 2
+      fi
+
+      # Use release-compatible signing for debug/CI artifacts when all group vars exist.
+      # Otherwise leave signing unset so the consumer's own fallback policy applies.
+      if [ -n "${RELEASE_KEYSTORE:-}" ] && [ -n "${STORE_PASSWORD:-}" ] && [ -n "${KEY_ALIAS:-}" ] && [ -n "${KEY_PASSWORD:-}" ]; then
+        keystore_path="$CI_PROJECT_DIR/app/release.jks"
+        mkdir -p "$(dirname "$keystore_path")"
+        printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
+        chmod 0600 "$keystore_path"
+        export KEYSTORE_FILE="$keystore_path"
+        export STORE_PASSWORD
+        export KEY_ALIAS
+        export KEY_PASSWORD
+        echo "signing=release-compatible"
+      else
+        echo "signing=consumer-default (release credentials incomplete)"
+      fi
+      bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_BUILD_TASKS
+  artifacts:
+    when: always
+    expire_in: 14 days
+
+.magisk_android_detekt:
+  extends: .magisk_android_base
+  stage: quality
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
+      : "${MAGISK_ANDROID_DETEKT_TASKS:=detekt --continue}"
+
+      set +e
+      bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_DETEKT_TASKS
+      detekt_status="$?"
+      set -e
+
+      mkdir -p merged-sarif
+      mapfile -t sarif_files < <(find . -path '*/build/reports/detekt/detekt.sarif' -type f | sort)
+      if [ "${#sarif_files[@]}" -gt 0 ]; then
+        python3 - "${sarif_files[@]}" <<'PY'
+      import json
+      import sys
+      from pathlib import Path
+
+      inputs = [Path(path) for path in sys.argv[1:]]
+      merged = None
+      merged_runs = []
+
+      for path in inputs:
+          data = json.loads(path.read_text())
+          if merged is None:
+              merged = data
+              merged["runs"] = []
+          merged_runs.extend(data.get("runs") or [])
+
+      if merged is None:
+          raise SystemExit("No SARIF inputs")
+
+      merged["runs"] = merged_runs
+      Path("merged-sarif/detekt.sarif").write_text(json.dumps(merged))
+      PY
+      fi
+
+      exit "$detekt_status"
+  artifacts:
+    when: always
+    expire_in: 14 days
