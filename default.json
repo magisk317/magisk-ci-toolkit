@@ -15,7 +15,6 @@
   "prCreation": "immediate",
   "prConcurrentLimit": 1,
   "branchConcurrentLimit": 1,
-  "commitMessageSuffix": "[renovate]",
   "prHourlyLimit": 0,
   "ignoreTests": true,
   "platformAutomerge": false,
