@@ -1,0 +1,39 @@
+name: 'Setup Android CI'
+description: 'Common setup steps for Android CI workflows'
+
+inputs:
+  checkout:
+    description: 'Whether to checkout the consumer repository'
+    required: false
+    default: 'true'
+  java-version:
+    description: 'Java version to use'
+    required: false
+    default: '26'
+  fetch-depth:
+    description: 'Git fetch depth'
+    required: false
+    default: '0'
+  submodules:
+    description: 'Whether to checkout submodules'
+    required: false
+    default: 'recursive'
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v7
+      if: inputs.checkout == 'true'
+      with:
+        submodules: ${{ inputs.submodules }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+
+    - uses: gradle/actions/setup-gradle@v6
+      with:
+        validate-wrappers: false
+        allow-snapshot-wrappers: true

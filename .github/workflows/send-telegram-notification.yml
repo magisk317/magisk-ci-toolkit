@@ -1,0 +1,494 @@
+name: Send Telegram Notification
+
+on:
+  workflow_call:
+    inputs:
+      project_tag:
+        description: 'Project tag for notifications (e.g., 📌 #XposedSmsCode)'
+        type: string
+        required: true
+      ci_branch:
+        description: 'Branch to send CI notifications for'
+        type: string
+        default: 'beta'
+      release_notes_source:
+        description: 'Path to changelog file for release notes'
+        type: string
+        default: 'docs/CHANGELOG.md'
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_CHAT_ID:
+        required: true
+      TELEGRAM_THREAD_ID:
+        required: true
+      TELEGRAM_CI_THREAD_ID:
+        required: false
+
+jobs:
+  notification:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Download artifacts
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == inputs.ci_branch
+        uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          path: artifacts
+          github-token: ${{ github.token }}
+
+      - name: Send Notification
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          ASSETS_JSON: ${{ toJson(github.event.release.assets) }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+          TG_CI_THREAD_ID: ${{ secrets.TELEGRAM_CI_THREAD_ID }}
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MAGISK_TELEGRAM_PIN: ${{ vars.MAGISK_TELEGRAM_PIN }}
+          EVENT_NAME: ${{ github.event_name }}
+          WF_RUN_ID: ${{ github.event.workflow_run.id }}
+          WF_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WF_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WF_RUN_NAME: ${{ github.event.workflow_run.name }}
+          WF_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          WF_RUN_REPO: ${{ github.repository }}
+          WF_RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CI_COMMIT_TITLE: ${{ github.event.workflow_run.display_title }}
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_TAG: ${{ inputs.project_tag }}
+          CI_BRANCH: ${{ inputs.ci_branch }}
+          RELEASE_NOTES_SOURCE: ${{ inputs.release_notes_source }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TG_BOT_TOKEN:-}" ]; then
+            echo "TG_BOT_TOKEN not set, skip."
+            exit 0
+          fi
+
+          TG_MAX_FILESIZE=$((50 * 1024 * 1024))
+
+          telegram_html_escape() {
+            local value=${1:-}
+            value=${value//&/&amp;}
+            value=${value//</&lt;}
+            value=${value//>/&gt;}
+            value=${value//\"/&quot;}
+            printf '%s' "$value"
+          }
+
+          telegram_html_link() {
+            local url=$1
+            local label=$2
+            if [ -z "$url" ]; then
+              telegram_html_escape "$label"
+              return
+            fi
+            printf '<a href="%s">%s</a>' "$(telegram_html_escape "$url")" "$(telegram_html_escape "$label")"
+          }
+
+          telegram_markdown_to_html() {
+            local input_file
+            input_file="$(mktemp)"
+            cat > "$input_file"
+            python3 - "$input_file" <<'PY'
+          import html
+          import pathlib
+          import re
+          import sys
+          import urllib.parse
+
+          source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+
+          def esc(value: str, *, quote: bool = False) -> str:
+              return html.escape(value, quote=quote)
+
+
+          def link(url: str, label: str) -> str:
+              return f'<a href="{esc(url, quote=True)}">{esc(label)}</a>'
+
+
+          def compare_label(url: str) -> str:
+              match = re.search(r"/compare/([^?#\s<>]+)\.\.\.([^?#\s<>]+)", url)
+              if not match:
+                  return url
+              left = urllib.parse.unquote(match.group(1))
+              right = urllib.parse.unquote(match.group(2))
+              return f"{left}...{right}"
+
+
+          def plain_markdown_to_html(value: str) -> str:
+              escaped = esc(value)
+              escaped = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", escaped)
+              escaped = re.sub(r"__([^_\n]+)__", r"<b>\1</b>", escaped)
+              escaped = re.sub(r"~~([^~\n]+)~~", r"<s>\1</s>", escaped)
+              return escaped
+
+
+          def inline_markdown_to_html(value: str) -> str:
+              result: list[str] = []
+              pos = 0
+              code_or_link = re.compile(r"`([^`\n]+)`|\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+              for match in code_or_link.finditer(value):
+                  result.append(plain_markdown_to_html(value[pos:match.start()]))
+                  if match.group(1) is not None:
+                      result.append(f"<code>{esc(match.group(1))}</code>")
+                  else:
+                      result.append(link(match.group(3), match.group(2)))
+                  pos = match.end()
+              result.append(plain_markdown_to_html(value[pos:]))
+              return "".join(result)
+
+
+          def line_to_html(line: str) -> str:
+              changelog = re.match(r"^(\s*>[ \t]*)?Full Changelog:[ \t]*(https?://\S+)\s*$", line)
+              if changelog:
+                  prefix = "&gt; " if changelog.group(1) else ""
+                  url = changelog.group(2)
+                  return f"{prefix}Full Changelog: {link(url, compare_label(url))}"
+              return inline_markdown_to_html(line)
+
+
+          output: list[str] = []
+          code_lines: list[str] = []
+          in_code = False
+
+          for line in source.splitlines():
+              if line.strip().startswith("```"):
+                  if in_code:
+                      output.append(f"<pre><code>{esc(chr(10).join(code_lines))}</code></pre>")
+                      code_lines = []
+                      in_code = False
+                  else:
+                      in_code = True
+                      code_lines = []
+                  continue
+              if in_code:
+                  code_lines.append(line)
+              else:
+                  output.append(line_to_html(line))
+
+          if in_code:
+              output.append(f"<pre><code>{esc(chr(10).join(code_lines))}</code></pre>")
+
+          print("\n".join(output))
+          PY
+            rm -f "$input_file"
+          }
+
+          # --- optional rolling pin (MAGISK_TELEGRAM_PIN=latest) ---
+          TELEGRAM_LAST_MESSAGE_ID=""
+
+          telegram_capture_message_id() {
+            local resp=${1:-}
+            [ -n "$resp" ] || return 0
+            local id
+            id="$(printf '%s' "$resp" | tr -d '\n' | sed -nE 's/.*"message_id":([0-9]+).*/\1/p')"
+            [ -n "$id" ] || return 0
+            TELEGRAM_LAST_MESSAGE_ID="$id"
+          }
+
+          telegram_read_pin_var() {
+            local var_name=$1
+            local val=""
+            local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+            if [ -n "$token" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+              val="$(curl -sS -H "Authorization: Bearer $token" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables/$var_name" 2>/dev/null \
+                | sed -nE 's/.*"value":"?([^"]*)"?.*/\1/p' || true)"
+            fi
+            [ "$val" != "0" ] && [ -n "$val" ] && printf '%s' "$val" || true
+          }
+
+          telegram_write_pin_var() {
+            local var_name=$1 value=$2
+            local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+            [ -n "$token" ] && [ -n "${GITHUB_REPOSITORY:-}" ] || return 0
+            local rc
+            rc="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables/$var_name" 2>/dev/null || true)"
+            if [ "$rc" = "200" ]; then
+              curl -sS -X PATCH -H "Authorization: Bearer $token" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables/$var_name" \
+                -H "Content-Type: application/json" -d "{\"value\":\"$value\"}" >/dev/null 2>&1 || true
+            else
+              curl -sS -X POST -H "Authorization: Bearer $token" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables" \
+                -H "Content-Type: application/json" -d "{\"name\":\"$var_name\",\"value\":\"$value\"}" >/dev/null 2>&1 || true
+            fi
+          }
+
+          telegram_pin_latest() {
+            [ "${MAGISK_TELEGRAM_PIN:-latest}" = "latest" ] || return 0
+            local message_id=${TELEGRAM_LAST_MESSAGE_ID:-}
+            if [ -z "$message_id" ]; then
+              echo "MAGISK_TELEGRAM_PIN=latest but no message id was captured; nothing to pin."
+              return 0
+            fi
+            local pin_type=${2:-ci}
+            local var_name="TG_LAST_$(printf '%s' "$pin_type" | tr '[:lower:]' '[:upper:]')_PIN_ID"
+
+            local old_id=""
+            old_id="$(telegram_read_pin_var "$var_name")"
+
+            if ! curl --fail -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/pinChatMessage" \
+              -d "chat_id=${TG_CHAT_ID}" -d "message_id=${message_id}" \
+              -d "disable_notification=true" >/dev/null 2>&1; then
+              echo "Telegram pinChatMessage failed; keeping previous pinned message."
+              return 0
+            fi
+
+            if [ -n "$old_id" ] && [ "$old_id" != "$message_id" ]; then
+              curl --fail -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/unpinChatMessage" \
+                -d "chat_id=${TG_CHAT_ID}" -d "message_id=$old_id" >/dev/null 2>&1 || true
+            fi
+
+            telegram_write_pin_var "$var_name" "$message_id"
+          }
+
+          send_message() {
+            local thread=$1
+            local text=$2
+            local curl_args=(
+              --fail-with-body
+              -sS
+              -X POST
+              "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
+              -d "chat_id=${TG_CHAT_ID}"
+              --data-urlencode "text=${text}"
+              -d "parse_mode=HTML"
+              -d "disable_web_page_preview=true"
+            )
+            if [ -n "$thread" ]; then
+              curl_args+=(-d "message_thread_id=$thread")
+            fi
+            local resp
+            if ! resp="$(curl "${curl_args[@]}")"; then
+              printf '%s\n' "$resp" >&2
+              exit 1
+            fi
+            telegram_capture_message_id "$resp"
+          }
+
+          send_document() {
+            local file=$1
+            local thread=$2
+            local caption=$3
+            local size
+            size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+            local name
+            name=$(basename "$file")
+            local upload_name
+            upload_name=$(telegram_upload_name "$name")
+
+            if [ "$size" -gt "$TG_MAX_FILESIZE" ]; then
+              echo "$name is $((size / 1024 / 1024))MB, exceeds 50MB limit; sending download link instead."
+              local link
+              if [ -n "${WF_RUN_ID:-}" ]; then
+                link="https://github.com/${WF_RUN_REPO}/actions/runs/${WF_RUN_ID}"
+              elif [ -n "${RELEASE_TAG:-}" ]; then
+                link="https://github.com/${WF_RUN_REPO}/releases/tag/${RELEASE_TAG}"
+              else
+                link="https://github.com/${WF_RUN_REPO}/releases"
+              fi
+              local link_label="Download"
+              if [ -n "${WF_RUN_ID:-}" ]; then
+                link_label="${WF_RUN_ID}"
+              elif [ -n "${RELEASE_TAG:-}" ]; then
+                link_label="${RELEASE_TAG}"
+              fi
+              local msg
+              msg=$(printf '📦 %s (%sMB) exceeds Telegram upload limit.\n🔗 Download: %s' \
+                "$(telegram_html_escape "$name")" \
+                "$((size / 1024 / 1024))" \
+                "$(telegram_html_link "$link" "$link_label")")
+              send_message "$thread" "$msg"
+              return 0
+            fi
+
+            echo "Sending $file to Telegram..."
+            local curl_args=(
+              --fail-with-body
+              -sS
+              -X POST
+              "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument"
+              -F "chat_id=${TG_CHAT_ID}"
+              -F "document=@${file};filename=${upload_name};type=application/octet-stream"
+            )
+            if [ -n "$thread" ]; then
+              curl_args+=(-F "message_thread_id=$thread")
+            fi
+            if [ -n "$caption" ]; then
+              curl_args+=(-F "caption=$caption")
+            fi
+            local resp
+            if ! resp="$(curl "${curl_args[@]}")"; then
+              printf '%s\n' "$resp" >&2
+              exit 1
+            fi
+            telegram_capture_message_id "$resp"
+          }
+
+          telegram_upload_name() {
+            local name=$1
+            local max_len=60
+
+            if [ "${#name}" -le "$max_len" ]; then
+              printf '%s' "$name"
+              return 0
+            fi
+
+            local ext=""
+            local stem=$name
+            if [[ "$name" == *.* ]]; then
+              ext=".${name##*.}"
+              stem="${name%.*}"
+            fi
+
+            local keep=$((max_len - ${#ext} - 2))
+            if [ "$keep" -lt 16 ]; then
+              printf '%s' "$name"
+              return 0
+            fi
+
+            local head_len=$((keep / 2))
+            local tail_len=$((keep - head_len))
+            printf '%s__%s%s' "${stem:0:head_len}" "${stem: -tail_len}" "$ext"
+          }
+
+          if [ -n "${WF_RUN_ID:-}" ]; then
+            if [ "${WF_RUN_CONCLUSION:-}" != "success" ]; then
+              exit 0
+            fi
+
+            if [ "${WF_RUN_NAME:-}" = "Release" ]; then
+              if [[ "${WF_RUN_BRANCH:-}" != v* ]]; then
+                exit 0
+              fi
+
+              RELEASE_TAG="${WF_RUN_BRANCH}"
+              if ! ASSETS_JSON="$(gh release view "$RELEASE_TAG" --repo "$WF_RUN_REPO" --json assets --jq '.assets')"; then
+                echo "Release $RELEASE_TAG not found, skip Telegram release notification."
+                exit 0
+              fi
+            elif [ "${WF_RUN_NAME:-}" = "CI" ]; then
+              # Only send for specified CI branch success
+              if [ "${WF_RUN_BRANCH:-}" != "${CI_BRANCH}" ]; then
+                exit 0
+              fi
+
+              if [ -n "${WF_RUN_SHA:-}" ] && git tag --points-at "$WF_RUN_SHA" 2>/dev/null | grep -q .; then
+                echo "Commit $WF_RUN_SHA has tags, skipping CI notification (Release will notify)."
+                exit 0
+              fi
+
+              PROJECT_NAME="${PROJECT_TAG##*#}"
+              if [ -n "${PROJECT_VERSION:-}" ]; then
+                CI_MSG="✅ $(telegram_html_escape "${PROJECT_NAME}")：$(telegram_html_escape "${PROJECT_VERSION}")"
+              else
+                CI_MSG="✅ $(telegram_html_escape "${PROJECT_NAME}")"
+              fi
+              if [ -n "$PROJECT_TAG" ]; then
+                CI_MSG+=$'\n'"$(telegram_html_escape "$PROJECT_TAG")"
+              fi
+              if [ -n "${CI_COMMIT_TITLE:-}" ]; then
+                CI_MSG+=$'\n'"📋 $(telegram_html_link "${WF_RUN_URL:-}" "${CI_COMMIT_TITLE}")"
+              fi
+              CI_THREAD=""
+              if [ -n "${TG_CI_THREAD_ID:-}" ]; then
+                CI_THREAD="$TG_CI_THREAD_ID"
+              fi
+              send_message "$CI_THREAD" "$CI_MSG"
+
+              if [ -d "artifacts" ]; then
+                mapfile -d '' ci_apks < <(
+                  find artifacts -type f \( -name '*arm64-v8a*.apk' -o -name '*arm64-v8a*.zip' \) -print0 | sort -z
+                )
+                if [ "${#ci_apks[@]}" -eq 0 ]; then
+                  echo "No arm64-v8a APK or ZIP artifacts found."
+                else
+                  for apk in "${ci_apks[@]}"; do
+                    apk_caption=$(printf '📦 %s' "$(basename "$apk")")
+                    send_document "$apk" "$CI_THREAD" "$apk_caption"
+                  done
+                fi
+              else
+                echo "No downloaded artifacts directory found."
+              fi
+              telegram_pin_latest "$CI_THREAD" ci
+              exit 0
+            else
+              exit 0
+            fi
+          fi
+
+          if [ -z "${RELEASE_TAG:-}" ]; then
+            if [ -n "${GITHUB_REF_NAME:-}" ] && [ "${EVENT_NAME:-}" = "release" ]; then
+              RELEASE_TAG="${GITHUB_REF_NAME}"
+            else
+              RELEASE_TAG="manual"
+            fi
+          fi
+
+          if [ "${EVENT_NAME:-}" = "release" ] && [[ "${RELEASE_TAG}" == v* ]]; then
+            echo "Full release notification (tag ${RELEASE_TAG}) is handled by Release workflow_run; skipping release event to avoid duplicates."
+            exit 0
+          fi
+
+          RELEASE_NOTES_FILE="release-notes.md"
+          release_name="$RELEASE_TAG"
+          if [[ "$release_name" != v* ]]; then
+            release_name="v$release_name"
+          fi
+          if awk -v version="$release_name" '
+            $0 == "---" && found { exit }
+            found { print; next }
+            index($0, "## [" version "]") == 1 { found = 1; print; next }
+            END { if (!found) exit 1 }
+          ' "$RELEASE_NOTES_SOURCE" > "$RELEASE_NOTES_FILE"; then
+            RELEASE_NOTES_CONTENT="$(cat "$RELEASE_NOTES_FILE")"
+          else
+            RELEASE_NOTES_CONTENT="Release notes not found in $RELEASE_NOTES_SOURCE for $release_name"
+          fi
+          RELEASE_NOTES_HTML="$(printf '%s' "$RELEASE_NOTES_CONTENT" | telegram_markdown_to_html)"
+
+          PROJECT_NAME="${PROJECT_TAG##*#}"
+          RELEASE_PAGE_URL="${RELEASE_PAGE_URL:-https://github.com/${GITHUB_REPOSITORY:-}/releases/tag/${RELEASE_TAG}}"
+          CAPTION='📦' "$(telegram_html_escape "$PROJECT_NAME")：$(telegram_html_link "$RELEASE_PAGE_URL" "$RELEASE_TAG")"
+          if [ -n "$PROJECT_TAG" ]; then
+            CAPTION+=$'\n'"$(telegram_html_escape "$PROJECT_TAG")"
+          fi
+          if [ -n "$RELEASE_NOTES_HTML" ]; then
+            CAPTION+=$'\n\n'"$RELEASE_NOTES_HTML"
+          fi
+
+          RELEASE_THREAD=""
+          if [ -n "${TG_THREAD_ID:-}" ]; then
+            RELEASE_THREAD="$TG_THREAD_ID"
+          fi
+          send_message "$RELEASE_THREAD" "$CAPTION"
+
+          if [ "${ASSETS_JSON:-null}" != "null" ]; then
+            mkdir -p downloads
+            while read -r asset; do
+              name=$(echo "$asset" | jq -r '.name')
+              url=$(echo "$asset" | jq -r '.browser_download_url // .url')
+              if [[ "$name" == *arm64-v8a*.apk || "$name" == *arm64-v8a*.zip ]]; then
+                echo "Downloading $name..."
+                curl --fail-with-body -L -sS -o "downloads/$name" "$url"
+                asset_caption=$(printf '📦 %s' "$name")
+                send_document "downloads/$name" "$RELEASE_THREAD" "$asset_caption"
+              fi
+            done < <(echo "$ASSETS_JSON" | jq -c '.[]')
+          fi
+          telegram_pin_latest "$RELEASE_THREAD" release
