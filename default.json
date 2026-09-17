@@ -31,6 +31,13 @@
   ],
   "packageRules": [
     {
+      "description": "Docker tags carry no release timestamp, so minimumReleaseAge can never be satisfied for them.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "minimumReleaseAge": null
+    },
+    {
       "matchManagers": [
         "gradle",
         "maven"
