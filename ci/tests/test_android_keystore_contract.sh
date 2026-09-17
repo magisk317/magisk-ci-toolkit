@@ -20,7 +20,7 @@ if [ "$mkdir_count" -lt 2 ]; then
   fail "android-release.yml must have mkdir -p for keystore_path in both apk and aab release jobs (found $mkdir_count)"
 fi
 
-# Simulate keystore creation in a project root lacking app/ directory
+# Simulate keystore creation in a project root (keystore belongs at the root)
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -32,14 +32,14 @@ KEY_PASSWORD="password"
 
 # Execute logic as written in android.yml
 if [ -n "${RELEASE_KEYSTORE:-}" ] && [ -n "${STORE_PASSWORD:-}" ] && [ -n "${KEY_ALIAS:-}" ] && [ -n "${KEY_PASSWORD:-}" ]; then
-  keystore_path="$CI_PROJECT_DIR/app/release.jks"
+  keystore_path="${MAGISK_ANDROID_RELEASE_KEYSTORE_PATH:-$CI_PROJECT_DIR/release.jks}"
   mkdir -p "$(dirname "$keystore_path")"
   printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
   chmod 0600 "$keystore_path"
 fi
 
-[ -f "$tmp_dir/app/release.jks" ] || fail "keystore file was not created successfully"
-content="$(cat "$tmp_dir/app/release.jks")"
+[ -f "$tmp_dir/release.jks" ] || fail "keystore file was not created successfully"
+content="$(cat "$tmp_dir/release.jks")"
 [ "$content" = "fake-keystore-content" ] || fail "keystore content mismatch: $content"
 
 echo "Keystore path contract tests passed"

@@ -101,7 +101,7 @@ jobs:
 
       - name: Decode Keystore
         if: env.HAS_RELEASE_KEYSTORE == 'true'
-        run: echo "${{ secrets.RELEASE_KEYSTORE }}" | base64 --decode > app/release.jks
+        run: echo "${{ secrets.RELEASE_KEYSTORE }}" | base64 --decode > release.jks
 
       - name: Build GitHub APK with Splits
         uses: ./.magisk-ci-toolkit/.github/actions/run-gradle-with-retry
@@ -166,7 +166,7 @@ jobs:
 
       - name: Decode Keystore
         if: env.HAS_RELEASE_KEYSTORE == 'true'
-        run: echo "${{ secrets.RELEASE_KEYSTORE }}" | base64 --decode > app/release.jks
+        run: echo "${{ secrets.RELEASE_KEYSTORE }}" | base64 --decode > release.jks
 
       - name: Build App Bundle
         uses: ./.magisk-ci-toolkit/.github/actions/run-gradle-with-retry

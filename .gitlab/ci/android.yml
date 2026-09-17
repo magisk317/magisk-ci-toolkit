@@ -336,7 +336,7 @@
       # Use release-compatible signing for debug/CI artifacts when all group vars exist.
       # Otherwise leave signing unset so the consumer's own fallback policy applies.
       if [ -n "${RELEASE_KEYSTORE:-}" ] && [ -n "${STORE_PASSWORD:-}" ] && [ -n "${KEY_ALIAS:-}" ] && [ -n "${KEY_PASSWORD:-}" ]; then
-        keystore_path="$CI_PROJECT_DIR/app/release.jks"
+        keystore_path="${MAGISK_ANDROID_RELEASE_KEYSTORE_PATH:-$CI_PROJECT_DIR/release.jks}"
         mkdir -p "$(dirname "$keystore_path")"
         printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
         chmod 0600 "$keystore_path"

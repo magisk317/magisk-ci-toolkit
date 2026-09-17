@@ -92,31 +92,65 @@
       chmod +x scripts/release/check_release_guard.sh
       scripts/release/check_release_guard.sh "$CI_COMMIT_TAG"
 
+# ---------------------------------------------------------------------------
+# Release template contract. The shared repo declares WHAT a project must
+# provide, never the value itself - the values are project-specific.
+#
+#   MAGISK_ANDROID_RELEASE_APK_TASKS / _AAB_TASKS   required  gradle task list,
+#                                                             e.g. ":app:assembleRelease"
+#   MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS        optional  extra -P/system props
+#   MAGISK_ANDROID_RELEASE_APK_ROOTS                optional  default "app/build/outputs/apk"
+#   MAGISK_ANDROID_RELEASE_KEYSTORE_PATH            optional  default "$CI_PROJECT_DIR/release.jks"
+#   MAGISK_ANDROID_RELEASE_INJECT_VERSION           optional  default "true"
+#
+# The keystore lives at the repository root because that is the first path the
+# shared signing convention plugin looks at (release.jks, then app/release.jks).
+# ---------------------------------------------------------------------------
 .magisk_android_release_apk:
   extends:
     - .magisk_android_base
     - .magisk_android_release_tag_rules
   stage: release
-  variables:
-    MAGISK_ANDROID_RELEASE_APK_TASKS: ":app:assembleGithubRelease -PbuildSplits"
   script:
     - |
       set -euo pipefail
       : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
+      : "${MAGISK_ANDROID_RELEASE_APK_TASKS:?MAGISK_ANDROID_RELEASE_APK_TASKS is required (the gradle task list is project-specific, e.g. ':app:assembleRelease')}"
+      : "${MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS:=}"
       : "${RELEASE_KEYSTORE:?RELEASE_KEYSTORE is required}"
       : "${STORE_PASSWORD:?STORE_PASSWORD is required}"
       : "${KEY_ALIAS:?KEY_ALIAS is required}"
       : "${KEY_PASSWORD:?KEY_PASSWORD is required}"
 
-      keystore_path="$CI_PROJECT_DIR/app/release.jks"
+      keystore_path="${MAGISK_ANDROID_RELEASE_KEYSTORE_PATH:-$CI_PROJECT_DIR/release.jks}"
       mkdir -p "$(dirname "$keystore_path")"
       printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
       chmod 0600 "$keystore_path"
+
+      # One version source for every release build: resolve the Play decision
+      # (versionName from gradle/libs.versions.toml, versionCode from the Play
+      # track) and inject it into gradle. play-release.env carries the same
+      # numbers downstream so no job has to re-derive them.
+      # Opt out with MAGISK_ANDROID_RELEASE_INJECT_VERSION=false.
+      MAGISK_ANDROID_RELEASE_VERSION_ARGS=""
+      if [[ "${MAGISK_ANDROID_RELEASE_INJECT_VERSION:-true}" == "true" ]]; then
+        : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required to resolve the release version}"
+        bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
+          --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+          --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
+          --output "$CI_PROJECT_DIR/play-release.env" \
+          --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
+        set -a
+        # shellcheck disable=SC1091
+        . "$CI_PROJECT_DIR/play-release.env"
+        set +a
+        MAGISK_ANDROID_RELEASE_VERSION_ARGS="-PversionName=${MAGISK_PLAY_VERSION_NAME:-} -PversionCode=${MAGISK_PLAY_VERSION_CODE:-}"
+      fi
       KEYSTORE_FILE="$keystore_path" \
       STORE_PASSWORD="$STORE_PASSWORD" \
       KEY_ALIAS="$KEY_ALIAS" \
       KEY_PASSWORD="$KEY_PASSWORD" \
-        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_APK_TASKS
+        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_VERSION_ARGS $MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS $MAGISK_ANDROID_RELEASE_APK_TASKS
       chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/validate_android_apk_signatures.sh"
       MAGISK_ANDROID_RELEASE_APK_ROOTS="${MAGISK_ANDROID_RELEASE_APK_ROOTS:-app/build/outputs/apk}" \
         bash "$MAGISK_CI_TOOLKIT_DIR/release/validate_android_apk_signatures.sh"
@@ -125,16 +159,16 @@
     when: always
     expire_in: 30 days
     paths:
-      - app/build/outputs/apk/**/release/*.apk
-      - app/build/outputs/native-debug-symbols/**/native-debug-symbols.zip
+      - "*/build/outputs/apk/**/release/*.apk"
+      - "*/build/outputs/mapping/**/mapping.txt"
+      - "*/build/outputs/native-debug-symbols/**/*.zip"
+      - play-release.env
 
 .magisk_android_release_aab:
   extends:
     - .magisk_android_base
     - .magisk_android_release_tag_rules
   stage: release
-  variables:
-    MAGISK_ANDROID_RELEASE_AAB_TASKS: ":app:bundlePlayRelease"
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $MAGISK_ANDROID_RELEASE_PUBLISH_PLAY == "true"'
     - when: never
@@ -142,35 +176,50 @@
     - |
       set -euo pipefail
       : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
+      : "${MAGISK_ANDROID_RELEASE_AAB_TASKS:?MAGISK_ANDROID_RELEASE_AAB_TASKS is required (the gradle task list is project-specific, e.g. ':app:bundleRelease')}"
+      : "${MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS:=}"
       : "${RELEASE_KEYSTORE:?RELEASE_KEYSTORE is required}"
       : "${STORE_PASSWORD:?STORE_PASSWORD is required}"
       : "${KEY_ALIAS:?KEY_ALIAS is required}"
       : "${KEY_PASSWORD:?KEY_PASSWORD is required}"
 
-      keystore_path="$CI_PROJECT_DIR/app/release.jks"
+      keystore_path="${MAGISK_ANDROID_RELEASE_KEYSTORE_PATH:-$CI_PROJECT_DIR/release.jks}"
       mkdir -p "$(dirname "$keystore_path")"
       printf '%s' "$RELEASE_KEYSTORE" | base64 --decode > "$keystore_path"
       chmod 0600 "$keystore_path"
-      bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
-        --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
-        --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
-        --output "$CI_PROJECT_DIR/play-release.env" \
-        --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
-      source "$CI_PROJECT_DIR/play-release.env"
+
+      # One version source for every release build: resolve the Play decision
+      # (versionName from gradle/libs.versions.toml, versionCode from the Play
+      # track) and inject it into gradle. play-release.env carries the same
+      # numbers downstream so no job has to re-derive them.
+      # Opt out with MAGISK_ANDROID_RELEASE_INJECT_VERSION=false.
+      MAGISK_ANDROID_RELEASE_VERSION_ARGS=""
+      if [[ "${MAGISK_ANDROID_RELEASE_INJECT_VERSION:-true}" == "true" ]]; then
+        : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required to resolve the release version}"
+        bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
+          --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+          --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
+          --output "$CI_PROJECT_DIR/play-release.env" \
+          --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
+        set -a
+        # shellcheck disable=SC1091
+        . "$CI_PROJECT_DIR/play-release.env"
+        set +a
+        MAGISK_ANDROID_RELEASE_VERSION_ARGS="-PversionName=${MAGISK_PLAY_VERSION_NAME:-} -PversionCode=${MAGISK_PLAY_VERSION_CODE:-}"
+      fi
       KEYSTORE_FILE="$keystore_path" \
       STORE_PASSWORD="$STORE_PASSWORD" \
       KEY_ALIAS="$KEY_ALIAS" \
       KEY_PASSWORD="$KEY_PASSWORD" \
-        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_AAB_TASKS \
-          -PversionName="$MAGISK_PLAY_VERSION_NAME" -PversionCode="$MAGISK_PLAY_VERSION_CODE"
+        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_VERSION_ARGS $MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS $MAGISK_ANDROID_RELEASE_AAB_TASKS
   artifacts:
     name: "android-release-bundle-$CI_COMMIT_TAG"
     when: always
     expire_in: 30 days
     paths:
-      - app/build/outputs/bundle/**/*.aab
-      - app/build/outputs/mapping/**/mapping.txt
-      - app/build/outputs/native-debug-symbols/**/native-debug-symbols.zip
+      - "*/build/outputs/bundle/**/*.aab"
+      - "*/build/outputs/mapping/**/mapping.txt"
+      - "*/build/outputs/native-debug-symbols/**/*.zip"
       - play-release.env
 
 .magisk_android_gitlab_release:
@@ -593,36 +642,9 @@
 
 
 # ---------------------------------------------------------------------------
-# Opt-in: record the version decision as play-release.env during the APK build.
-#
-# Why: android:release:modules-repo derives the Xposed-Modules-Repo tag
-# ("<versionCode>-<versionName>") from play-release.env. The AAB template
-# always writes it, but the APK template does not, so a release that only
-# builds APKs makes the XMR tag fall back to a commit-count derivation.
-#
-# Enable by extending .magisk_android_release_apk_play_env instead of
-# .magisk_android_release_apk. If the job declares its own `artifacts:`, add
-# `play-release.env` to its paths as well (extends replaces, it does not merge).
+# Deprecated. Version resolution + injection now lives in both release
+# templates (MAGISK_ANDROID_RELEASE_INJECT_VERSION), so this anchor is a plain
+# alias kept for consumers that still extend it.
 # ---------------------------------------------------------------------------
 .magisk_android_release_apk_play_env:
   extends: .magisk_android_release_apk
-  variables:
-    MAGISK_ANDROID_RELEASE_RECORD_PLAY_ENV: "true"
-  script:
-    - !reference [.magisk_android_release_apk, script]
-    - |
-      set -euo pipefail
-      if [[ "${MAGISK_ANDROID_RELEASE_RECORD_PLAY_ENV:-false}" != "true" ]]; then
-        exit 0
-      fi
-      : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
-      bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
-        --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
-        --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
-        --output "$CI_PROJECT_DIR/play-release.env" \
-        --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
-      echo "recorded play-release.env:"
-      cat "$CI_PROJECT_DIR/play-release.env"
-  artifacts:
-    paths:
-      - play-release.env

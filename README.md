@@ -249,17 +249,22 @@ packages can raise the sdkmanager channel with
 The templates resolve this toolkit into `.magisk-ci-toolkit` at runtime and call
 `gradle/run_gradle_with_retry.sh`, which retries transient dependency download
 and TLS failures up to three times before giving up.
-The runtime checkout accepts a branch, tag, or full commit SHA. Production consumers should use the
-same immutable SHA for every toolkit `include.ref` and for `MAGISK_CI_TOOLKIT_REF`, so the parsed
-templates and the scripts executed by jobs cannot come from different revisions.
+The runtime checkout accepts a branch, tag, or full commit SHA. Production consumers should pin an
+**immutable tag** (for example `ref: v1`), not a bare commit SHA: a SHA looks equally pinned but
+becomes unreachable the moment the toolkit history is rewritten, which then breaks every consumer at
+once. Use the same ref for every toolkit `include.ref` and for `MAGISK_CI_TOOLKIT_REF`, so the
+parsed templates and the scripts executed by jobs cannot come from different revisions.
 
 When all four signing variables (`RELEASE_KEYSTORE`, `STORE_PASSWORD`,
-`KEY_ALIAS`, and `KEY_PASSWORD`) are non-empty, `.magisk_android_build` decodes
-the base64 keystore to `app/release.jks`, restricts it to mode `0600`, and
-exports an absolute `KEYSTORE_FILE` so every Android application module can use
-the same release-compatible identity. If any variable is missing, the template
-leaves signing unset and the consumer project's own fallback policy applies; it
-does not bypass consumer signing guards.
+`KEY_ALIAS`, and `KEY_PASSWORD`) are non-empty, the templates decode the base64
+keystore to `release.jks` at the **repository root**, restrict it to mode
+`0600`, and export an absolute `KEYSTORE_FILE` so every Android application
+module can use the same release-compatible identity. The root is also the first
+path the shared signing convention plugin looks at (`release.jks`, then
+`app/release.jks`). Override the destination with
+`MAGISK_ANDROID_RELEASE_KEYSTORE_PATH`. If any variable is missing, the
+template leaves signing unset and the consumer project's own fallback policy
+applies; it does not bypass consumer signing guards.
 
 #### .gitlab/ci/android-release.yml
 
@@ -327,6 +332,20 @@ Common variables:
   Defaults to `app/build/outputs/apk`. Consumed by `.magisk_android_release_apk`
   (signature validation), `.magisk_android_release_github` and
   `.magisk_android_publish_modules_repo` (release asset collection).
+- `MAGISK_ANDROID_RELEASE_APK_TASKS` / `MAGISK_ANDROID_RELEASE_AAB_TASKS`:
+  **required** gradle task list for the release build, for example
+  `:app:assembleRelease` or `:xmsf:assembleRelease :mipush:assembleGithubRelease`.
+  Which modules and flavours a project packages is project knowledge, so the
+  shared repo declares the contract and never supplies a default value.
+- `MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS`: optional extra `-P` / system
+  properties appended to the gradle invocation, such as `-PbuildSplits=true`.
+- `MAGISK_ANDROID_RELEASE_KEYSTORE_PATH`: keystore destination, default
+  `$CI_PROJECT_DIR/release.jks`.
+- `MAGISK_ANDROID_RELEASE_INJECT_VERSION`: default `true`. Resolves the release
+  version once per build (versionName from `gradle/libs.versions.toml`,
+  versionCode from the Play track), injects it into gradle, and exports
+  `play-release.env` so every downstream job reuses the same numbers instead of
+  re-deriving them. Set to `false` to let gradle own the version completely.
 - `RELEASE_KEYSTORE`, `STORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`: signing
   credentials. `RELEASE_KEYSTORE` is a base64-encoded keystore. Release APK and
   AAB jobs require all four values and pass an absolute, mode-`0600` keystore
