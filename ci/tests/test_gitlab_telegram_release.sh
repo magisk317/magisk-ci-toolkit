@@ -64,37 +64,66 @@ curl() {
 }
 export -f curl
 
-(
-  cd "$tmp_dir/work"
-  CAPTURE_FILE="$capture_file" \
-  TG_BOT_TOKEN=test \
-  TG_CHAT_ID=test \
-  MAGISK_TELEGRAM_PROJECT_NAME='Demo > Suite' \
-  MAGISK_TELEGRAM_PROJECT_TAG='#Demo' \
-  MAGISK_ANDROID_RELEASE_PACKAGE_NAME=com.example.demo \
-  MAGISK_ANDROID_RELEASE_PLAY_URL=https://play.example/apps/demo \
-  CI_PROJECT_NAME=Demo \
-  CI_PROJECT_URL=https://gitlab.com/example/demo \
-  CI_COMMIT_TAG=v3.3.1 \
-  CI_COMMIT_TITLE='chore(deps): bump fastify' \
-  CI_PIPELINE_ID=2706357831 \
-  CI_PIPELINE_URL=https://gitlab.com/example/demo/-/pipelines/2706357831 \
-    bash "$release_script" >/dev/null
-)
+# Runs the release script with the baseline environment plus any extra
+# assignments passed as arguments, then echoes the captured curl arguments.
+run_release() {
+  (
+    cd "$tmp_dir/work"
+    CAPTURE_FILE="$capture_file" \
+    TG_BOT_TOKEN=test \
+    TG_CHAT_ID=test \
+    MAGISK_TELEGRAM_PROJECT_NAME='Demo > Suite' \
+    MAGISK_TELEGRAM_PROJECT_TAG='#Demo' \
+    MAGISK_ANDROID_RELEASE_PACKAGE_NAME=com.example.demo \
+    MAGISK_ANDROID_RELEASE_PLAY_URL=https://play.example/apps/demo \
+    CI_PROJECT_NAME=Demo \
+    CI_PROJECT_URL=https://gitlab.com/example/demo \
+    CI_COMMIT_TAG=v3.3.1 \
+    CI_COMMIT_TITLE='chore(deps): bump fastify' \
+    CI_PIPELINE_ID=2706357831 \
+    CI_PIPELINE_URL=https://gitlab.com/example/demo/-/pipelines/2706357831 \
+      env "$@" bash "$release_script" >/dev/null
+    cat "$capture_file"
+  )
+}
 
-captured="$(cat "$capture_file")"
+captured="$(run_release)"
 assert_contains "$captured" 'Demo &gt; Suite' "greater-than signs must use valid HTML entities"
 assert_not_contains "$captured" '>gt;' "Bash replacement must not corrupt HTML entities"
-assert_contains "$captured" '<a href="https://gitlab.com/example/demo/-/releases/v3.3.1">v3.3.1</a>' \
-  "release should use a labeled hyperlink"
-assert_contains "$captured" '<a href="https://gitlab.com/example/demo/-/pipelines/2706357831">chore(deps): bump fastify</a>' \
-  "pipeline link should hang off the commit line"
-assert_not_contains "$captured" '🔗 Release:' \
-  "release row should be gone now that the version is the link"
+assert_contains "$captured" '📦 Demo &gt; Suite：v3.3.1' \
+  "the release head must carry the version as plain text"
+assert_contains "$captured" '<a href="https://gitlab.com/example/demo/-/releases/v3.3.1">GitLab</a>' \
+  "GitLab release must use a labeled hyperlink"
+assert_contains "$captured" '<a href="https://github.com/magisk317/Demo/releases/tag/v3.3.1">GitHub</a>' \
+  "the GitHub mirror link must default to <owner>/<CI_PROJECT_NAME>"
 assert_contains "$captured" '<a href="https://play.example/apps/demo">Google Play</a>' \
   "Play should use the configured canonical link"
+assert_not_contains "$captured" '🔗 Release:' \
+  "the old Release row must be gone now that channels are labeled links"
+assert_not_contains "$captured" '2706357831' \
+  "the pipeline line must not be part of the release message"
+assert_not_contains "$captured" 'chore(deps): bump fastify' \
+  "the commit title line must not be part of the release message"
 assert_not_contains "$captured" '🔗 Changelog:' "release message must not include the old changelog link"
 assert_not_contains "$captured" 'Full Changelog: https://' "raw changelog URLs must not remain in the notes"
+
+# The mirror coordinates are overridable because they are not always
+# <owner>/<CI_PROJECT_NAME>, for example when the mirror lives under another org.
+captured_owner="$(run_release MAGISK_TELEGRAM_RELEASE_GITHUB_OWNER=some-org)"
+assert_contains "$captured_owner" '<a href="https://github.com/some-org/Demo/releases/tag/v3.3.1">GitHub</a>' \
+  "MAGISK_TELEGRAM_RELEASE_GITHUB_OWNER must override the mirror owner"
+
+captured_repo="$(run_release MAGISK_TELEGRAM_RELEASE_GITHUB_REPO=NapGram/NapGram)"
+assert_contains "$captured_repo" '<a href="https://github.com/NapGram/NapGram/releases/tag/v3.3.1">GitHub</a>' \
+  "MAGISK_TELEGRAM_RELEASE_GITHUB_REPO must override the mirror coordinates"
+assert_not_contains "$captured_repo" 'github.com/magisk317/Demo' \
+  "the default mirror coordinates must not leak when overridden"
+
+captured_no_github="$(run_release MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK=false)"
+assert_not_contains "$captured_no_github" 'github.com/' \
+  "MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK=false must hide the GitHub link"
+assert_contains "$captured_no_github" 'GitLab</a>' \
+  "the GitLab link must survive hiding the GitHub link"
 
 owner_rules="$(awk '
   /^\.magisk_android_release_owner_rules:/ { capture = 1 }
