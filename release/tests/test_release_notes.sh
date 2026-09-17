@@ -22,6 +22,15 @@ assert_not_contains() {
   fi
 }
 
+# The channel badges share one row, so they must also share one height and count.
+assert_badge_row() {
+  local file=$1 expected_count=$2 count heights
+  count="$(grep -c '<img src=' "$file")"
+  [[ "$count" == "$expected_count" ]] || fail "expected $expected_count badges, found $count"
+  heights="$(grep -o 'height="[0-9]*"' "$file" | sort -u | wc -l)"
+  [[ "$heights" == "1" ]] || fail "badges must render at one height, got: $(grep -o 'height="[0-9]*"' "$file" | sort -u | tr '\n' ' ')"
+}
+
 cat > "$TMP_DIR/CHANGELOG.md" <<'CHANGELOG'
 # Changelog
 
@@ -45,17 +54,22 @@ bash "$ROOT_DIR/release/release_notes.sh" \
   --output "$TMP_DIR/gitlab-notes.md"
 
 assert_contains "$TMP_DIR/gitlab-notes.md" \
-  'https://play.example/apps/demo' \
+  'href="https://play.example/apps/demo"' \
   "GitLab notes should include the configured Play link"
 assert_contains "$TMP_DIR/gitlab-notes.md" \
   'href="https://gitlab.example/group/project/-/releases/v1.2.3"' \
   "GitLab notes should link to the current GitLab release"
 assert_contains "$TMP_DIR/gitlab-notes.md" \
-  'alt="Get it on GitLab"' \
-  "GitLab notes should render a GitLab badge"
+  'href="https://github.com/example/demo/releases/tag/v1.2.3"' \
+  "GitLab notes should also link to the GitHub mirror"
+for badge in 'Google Play' 'GitLab' 'GitHub'; do
+  assert_contains "$TMP_DIR/gitlab-notes.md" "alt=\"Get it on ${badge}\"" \
+    "GitLab notes should render the ${badge} badge"
+done
+assert_badge_row "$TMP_DIR/gitlab-notes.md" 3
 assert_not_contains "$TMP_DIR/gitlab-notes.md" \
-  'alt="Get it on GitHub"' \
-  "GitLab notes must not render the GitHub badge"
+  'raw.githubusercontent.com' \
+  "badges must not depend on a third-party image host"
 
 bash "$ROOT_DIR/release/release_notes.sh" \
   --tag v1.2.3 \
@@ -74,5 +88,9 @@ assert_contains "$TMP_DIR/github-notes.md" \
 assert_contains "$TMP_DIR/github-notes.md" \
   'alt="Get it on GitHub"' \
   "non-GitLab notes should preserve the GitHub badge"
+assert_not_contains "$TMP_DIR/github-notes.md" \
+  'alt="Get it on GitLab"' \
+  "notes without a GitLab project URL must not render a GitLab badge"
+assert_badge_row "$TMP_DIR/github-notes.md" 1
 
 echo "release notes badge contract tests passed"

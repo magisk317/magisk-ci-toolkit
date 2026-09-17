@@ -98,10 +98,14 @@ fi
 cat > "$output_file" <<'EOF'
 <div align="center">
 EOF
+# Every channel badge comes from the same shields.io "for-the-badge" family so
+# the row renders at one uniform height; the official Google Play PNG is a
+# different aspect ratio and made the GitLab badge look undersized next to it.
+badge_height="28"
 if [[ "$show_play_link" == "true" ]]; then
   cat >> "$output_file" <<EOF
   <a href="${play_url}">
-    <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" height="80"/>
+    <img src="https://img.shields.io/badge/Get%20it%20on-Google%20Play-01875F?style=for-the-badge&logo=googleplay&logoColor=white" alt="Get it on Google Play" height="${badge_height}"/>
   </a>
 EOF
 fi
@@ -109,13 +113,14 @@ if [[ -n "$gitlab_project_url" ]]; then
   gitlab_project_url="${gitlab_project_url%/}"
   cat >> "$output_file" <<EOF
   <a href="${gitlab_project_url}/-/releases/${tag_name}">
-    <img src="https://img.shields.io/badge/Get%20it%20on-GitLab-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white" alt="Get it on GitLab" height="40"/>
+    <img src="https://img.shields.io/badge/Get%20it%20on-GitLab-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white" alt="Get it on GitLab" height="${badge_height}"/>
   </a>
 EOF
-elif [[ -n "$source_repo" ]]; then
+fi
+if [[ -n "$source_repo" ]]; then
   cat >> "$output_file" <<EOF
   <a href="https://github.com/${source_repo}/releases/tag/${tag_name}">
-    <img src="https://raw.githubusercontent.com/machiav3lli/oandbackupx/master/badge_github.png" alt="Get it on GitHub" height="80"/>
+    <img src="https://img.shields.io/badge/Get%20it%20on-GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Get it on GitHub" height="${badge_height}"/>
   </a>
 EOF
 fi
