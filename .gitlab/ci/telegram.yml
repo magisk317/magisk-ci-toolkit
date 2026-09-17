@@ -568,6 +568,13 @@
     MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERN: "*arm64-v8a*.apk"
     MAGISK_TELEGRAM_RELEASE_NOTES_SOURCE: "docs/CHANGELOG.md"
     MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
+    # GitHub mirror coordinates used to build the release link.
+    # Override MAGISK_TELEGRAM_RELEASE_GITHUB_REPO with "<owner>/<repo>" when the
+    # GitHub mirror is not "<owner>/<CI_PROJECT_NAME>" (e.g. NapGram/NapGram).
+    MAGISK_TELEGRAM_RELEASE_GITHUB_OWNER: "magisk317"
+    MAGISK_TELEGRAM_RELEASE_GITHUB_REPO: ""
+    # Set to "false" to hide the GitHub link entirely.
+    MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK: "true"
   before_script:
     - apk add --no-cache bash coreutils curl findutils git
     - |
@@ -1137,20 +1144,29 @@
       fi
       play_line=""
       if [ "${MAGISK_ANDROID_RELEASE_SHOW_PLAY_LINK:-true}" = "true" ] && [ -n "$play_url" ]; then
-        play_line=$(printf '\n🔗 Play: %s' \
+        play_line=$(printf '\n🔗 %s' \
           "$(telegram_html_link "$play_url" "${MAGISK_TELEGRAM_RELEASE_PLAY_LABEL:-Google Play}")")
       fi
 
-      release_commit_title="${CI_COMMIT_TITLE:-${CI_COMMIT_MESSAGE:-}}"
-      release_commit_title="$(printf %s "$release_commit_title" | head -n 1)"
+      # GitHub mirror release link: https://github.com/<owner>/<repo>/releases/tag/<tag>
+      github_line=""
+      if [ "${MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK:-true}" = "true" ]; then
+        github_repo="${MAGISK_TELEGRAM_RELEASE_GITHUB_REPO:-}"
+        if [ -z "$github_repo" ]; then
+          github_owner="${MAGISK_TELEGRAM_RELEASE_GITHUB_OWNER:-magisk317}"
+          github_repo="${github_owner}/${CI_PROJECT_NAME}"
+        fi
+        github_release_url="https://github.com/${github_repo}/releases/tag/${release_tag}"
+        github_line=$(printf '\n🔗 %s' \
+          "$(telegram_html_link "$github_release_url" "${MAGISK_TELEGRAM_RELEASE_GITHUB_LABEL:-GitHub}")")
+      fi
 
-      release_head="📦 $(telegram_html_escape "$project_name")：$(telegram_html_link "$release_url" "$release_tag")"
+      release_head="📦 $(telegram_html_escape "$project_name")：$(telegram_html_escape "$release_tag")"
       if [ -n "$tag_line" ]; then
         release_head+=$'\n'"$(telegram_html_escape "$tag_line")"
       fi
-      if [ -n "$release_commit_title" ]; then
-        release_head+=$'\n'"📋 $(telegram_html_link "$CI_PIPELINE_URL" "$release_commit_title")"
-      fi
+      release_head+=$'\n'"🔗 $(telegram_html_link "$release_url" "${MAGISK_TELEGRAM_RELEASE_GITLAB_LABEL:-GitLab}")"
+      release_head+="$github_line"
       release_head+="$play_line"
       release_msg="$release_head"
       if [ -n "$release_notes_content" ]; then
