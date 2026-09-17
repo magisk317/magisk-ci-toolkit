@@ -439,3 +439,96 @@
           --title "$CI_COMMIT_TAG" \
           --notes-file release-notes.md
       fi
+
+# Publish the GitHub Release for a tag, driven from the GitLab pipeline.
+#
+# This is the "release owner stays on GitLab" path: GitLab CI builds and publishes
+# its own release, then mirrors the release (tag + notes + APK assets) to GitHub.
+# GitHub Actions is expected to be disabled for the repository, so this job is the
+# only thing that creates the GitHub Release.
+#
+# Requires:
+#   MAGISK_ANDROID_RELEASE_PACKAGE_NAME  (from the project .gitlab-ci.yml)
+#   GITHUB_RELEASE_TOKEN                 (repo scope; can be GH_PAT)
+# Optional:
+#   MAGISK_ANDROID_RELEASE_GITHUB_REPOSITORY   "<owner>/<repo>", default "<GITHUB_OWNER>/<CI_PROJECT_NAME>"
+#   MAGISK_GITHUB_RELEASE_OWNER                owner used when the repository is not set, default "magisk317"
+#   MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN  default "*arm64-v8a*.apk"
+#   MAGISK_ANDROID_RELEASE_GITHUB_RELEASE_NOTES  "false" to skip notes generation
+.magisk_android_release_github:
+  extends:
+    - .magisk_linux_base
+    - .magisk_android_release_owner_rules
+  stage: release
+  variables:
+    MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN: "*arm64-v8a*.apk"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab" && $GITHUB_RELEASE_TOKEN != ""'
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
+      : "${GITHUB_RELEASE_TOKEN:?GITHUB_RELEASE_TOKEN is required}"
+
+      github_repo="${MAGISK_ANDROID_RELEASE_GITHUB_REPOSITORY:-}"
+      if [[ -z "$github_repo" ]]; then
+        github_repo="${MAGISK_GITHUB_RELEASE_OWNER:-magisk317}/${CI_PROJECT_NAME}"
+      fi
+
+      find_apks() {
+        local pattern="$1"
+        find app/build/outputs/apk -type f -name "$pattern" -path '*/release/*' -print | sort
+      }
+
+      mapfile -t apk_files < <(find_apks "${MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN}")
+      if [[ "${#apk_files[@]}" -eq 0 ]]; then
+        echo "ERROR: no release APKs matched '${MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN}' under app/build/outputs/apk" >&2
+        exit 1
+      fi
+      echo "Publishing ${#apk_files[@]} asset(s) to ${github_repo}"
+
+      install -d -m 0755 /etc/apt/keyrings
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get -o APT::Update::Error-Mode=any update
+      apt-get install -y --no-install-recommends curl ca-certificates gpg
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+      chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list
+      apt-get -o APT::Update::Error-Mode=any update
+      apt-get install -y --no-install-recommends gh
+      rm -rf /var/lib/apt/lists/*
+
+      chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh"
+      export GH_TOKEN="$GITHUB_RELEASE_TOKEN"
+
+      notes_file="release-notes-github.md"
+      MAGISK_RELEASE_PLATFORM=github \
+        "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh" \
+          --tag "$CI_COMMIT_TAG" \
+          --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+          --source-repo "$github_repo" \
+          --play-url "${MAGISK_ANDROID_RELEASE_PLAY_URL:-}" \
+          --gitlab-project-url "$CI_PROJECT_URL" \
+          --generate-github-notes \
+          --output "$notes_file"
+
+      if gh release view "$CI_COMMIT_TAG" --repo "$github_repo" >/dev/null 2>&1; then
+        gh release upload "$CI_COMMIT_TAG" "${apk_files[@]}" \
+          --repo "$github_repo" \
+          --clobber
+        gh release edit "$CI_COMMIT_TAG" \
+          --repo "$github_repo" \
+          --title "$CI_COMMIT_TAG" \
+          --draft=false \
+          --notes-file "$notes_file"
+      else
+        gh release create "$CI_COMMIT_TAG" "${apk_files[@]}" \
+          --repo "$github_repo" \
+          --title "$CI_COMMIT_TAG" \
+          --notes-file "$notes_file"
+      fi
+
+      echo "GitHub release ready: https://github.com/${github_repo}/releases/tag/${CI_COMMIT_TAG}"
