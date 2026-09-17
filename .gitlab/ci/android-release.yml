@@ -590,3 +590,39 @@
       fi
 
       echo "GitHub release ready: https://github.com/${github_repo}/releases/tag/${CI_COMMIT_TAG}"
+
+
+# ---------------------------------------------------------------------------
+# Opt-in: record the version decision as play-release.env during the APK build.
+#
+# Why: android:release:modules-repo derives the Xposed-Modules-Repo tag
+# ("<versionCode>-<versionName>") from play-release.env. The AAB template
+# always writes it, but the APK template does not, so a release that only
+# builds APKs makes the XMR tag fall back to a commit-count derivation.
+#
+# Enable by extending .magisk_android_release_apk_play_env instead of
+# .magisk_android_release_apk. If the job declares its own `artifacts:`, add
+# `play-release.env` to its paths as well (extends replaces, it does not merge).
+# ---------------------------------------------------------------------------
+.magisk_android_release_apk_play_env:
+  extends: .magisk_android_release_apk
+  variables:
+    MAGISK_ANDROID_RELEASE_RECORD_PLAY_ENV: "true"
+  script:
+    - !reference [.magisk_android_release_apk, script]
+    - |
+      set -euo pipefail
+      if [[ "${MAGISK_ANDROID_RELEASE_RECORD_PLAY_ENV:-false}" != "true" ]]; then
+        exit 0
+      fi
+      : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
+      bash "$MAGISK_CI_TOOLKIT_DIR/release/resolve_play_release.sh" \
+        --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME" \
+        --version-file "$CI_PROJECT_DIR/gradle/libs.versions.toml" \
+        --output "$CI_PROJECT_DIR/play-release.env" \
+        --initial-version-code "${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
+      echo "recorded play-release.env:"
+      cat "$CI_PROJECT_DIR/play-release.env"
+  artifacts:
+    paths:
+      - play-release.env
