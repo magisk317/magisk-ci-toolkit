@@ -358,6 +358,21 @@
         printf 'MAGISK_RELEASE_STATUS=published\n'
       } > "$release_env_file"
 
+# Publishes the release into Xposed-Modules-Repo/<module>.
+#
+# Xposed-Modules-Repo expects "<versionCode>-<versionName>" release tags, so the
+# channel tag is derived here instead of reusing the "v<versionName>" tag that
+# the GitLab and GitHub releases use.
+#
+# Requires:
+#   MAGISK_ANDROID_RELEASE_PACKAGE_NAME  (from the project .gitlab-ci.yml)
+#   MAGISK_ANDROID_RELEASE_MODULES_REPO  (from the project .gitlab-ci.yml)
+#   XPOSED_MODULES_REPO_TOKEN
+# Optional:
+#   MAGISK_ANDROID_RELEASE_MODULES_REPO_TAG           explicit release tag override
+#   MAGISK_ANDROID_RELEASE_MODULES_REPO_VERSION_CODE  versionCode override
+#   MAGISK_PLAY_INITIAL_VERSION_CODE                  floor for the derived versionCode
+
 .magisk_android_publish_modules_repo:
   extends:
     - .magisk_linux_base
@@ -384,6 +399,39 @@
         echo "ERROR: no release APK files found under: ${apk_roots}" >&2
         exit 1
       fi
+
+      # Xposed-Modules-Repo tags every release "<versionCode>-<versionName>".
+      # Prefer the versionCode that the apk job baked into the APKs and recorded
+      # in play-release.env; otherwise fall back to the same git based derivation.
+      modules_version_name="${CI_COMMIT_TAG#v}"
+      modules_release_tag="${MAGISK_ANDROID_RELEASE_MODULES_REPO_TAG:-}"
+      if [ -z "$modules_release_tag" ]; then
+        modules_version_code="${MAGISK_ANDROID_RELEASE_MODULES_REPO_VERSION_CODE:-}"
+        if [ -z "$modules_version_code" ] && [ -f play-release.env ]; then
+          # shellcheck disable=SC1091
+          . ./play-release.env
+          modules_version_code="${MAGISK_PLAY_VERSION_CODE:-}"
+          if [ -n "${MAGISK_PLAY_VERSION_NAME:-}" ]; then
+            modules_version_name="$MAGISK_PLAY_VERSION_NAME"
+          fi
+        fi
+        if [ -z "$modules_version_code" ]; then
+          commit_count="$(git rev-list --first-parent --count HEAD 2>/dev/null || printf '0')"
+          case "$commit_count" in
+            ''|*[!0-9]*) commit_count=0 ;;
+          esac
+          modules_version_code=$((commit_count + 1))
+          initial_code="${MAGISK_PLAY_INITIAL_VERSION_CODE:-0}"
+          case "$initial_code" in
+            ''|*[!0-9]*) initial_code=0 ;;
+          esac
+          if [ "$initial_code" -gt 0 ] && [ "$modules_version_code" -le "$initial_code" ]; then
+            modules_version_code=$((initial_code + 1))
+          fi
+        fi
+        modules_release_tag="${modules_version_code}-${modules_version_name}"
+      fi
+      echo "Xposed-Modules-Repo release tag: ${modules_release_tag} (pipeline tag ${CI_COMMIT_TAG})"
 
       install -d -m 0755 /etc/apt/keyrings
       export DEBIAN_FRONTEND=noninteractive
@@ -430,19 +478,19 @@
           --output release-notes.md
       export GH_TOKEN="$XPOSED_MODULES_REPO_TOKEN"
 
-      if gh release view "$CI_COMMIT_TAG" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
-        gh release upload "$CI_COMMIT_TAG" "${apk_files[@]}" \
+      if gh release view "$modules_release_tag" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
+        gh release upload "$modules_release_tag" "${apk_files[@]}" \
           --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
           --clobber
-        gh release edit "$CI_COMMIT_TAG" \
+        gh release edit "$modules_release_tag" \
           --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
-          --title "$CI_COMMIT_TAG" \
+          --title "v${modules_version_name}" \
           --draft=false \
           --notes-file release-notes.md
       else
-        gh release create "$CI_COMMIT_TAG" "${apk_files[@]}" \
+        gh release create "$modules_release_tag" "${apk_files[@]}" \
           --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
-          --title "$CI_COMMIT_TAG" \
+          --title "v${modules_version_name}" \
           --notes-file release-notes.md
       fi
 

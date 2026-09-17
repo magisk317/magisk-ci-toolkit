@@ -313,7 +313,12 @@ Common variables:
 - `MAGISK_ANDROID_RELEASE_PLAY_TRACK`: default Play track, default
   `production`.
 - `MAGISK_ANDROID_RELEASE_MODULES_REPO`: GitHub `owner/repo` target for
-  Xposed-Modules-Repo publication.
+  Xposed-Modules-Repo publication. That repository expects release tags shaped
+  `<versionCode>-<versionName>`, so the job derives its own tag instead of
+  reusing the `v<versionName>` tag of the GitLab and GitHub releases, taking the
+  versionCode from the `play-release.env` artifact when present and falling back
+  to the commit count floored by `MAGISK_PLAY_INITIAL_VERSION_CODE`. Override
+  the tag with `MAGISK_ANDROID_RELEASE_MODULES_REPO_TAG`.
 - `MAGISK_ANDROID_RELEASE_CERT_SHA256`: public SHA-256 fingerprint expected for
   release APKs. `.magisk_android_release_apk` validates every APK after Gradle
   finishes, before any publisher job can consume the artifacts.
