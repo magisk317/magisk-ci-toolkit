@@ -21,7 +21,7 @@ shell:test:
     - if: '$CI_PIPELINE_SOURCE != "pipeline"'
     - when: never
   before_script:
-    - apk add --no-cache bash curl jq shellcheck
+    - apk add --no-cache bash curl jq shellcheck python3 openssl
   script:
     - bash -n ci/*.sh ci/tests/*.sh
     - >-
@@ -34,10 +34,14 @@ shell:test:
       ci/tests/test_cancel_older_renovate_pipelines.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_renovate_serial_loop.sh
+      ci/tests/test_gitlab_telegram_release.sh
+      ci/tests/test_linux_release_template.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
     - bash ci/tests/test_cancel_older_renovate_pipelines.sh
     - bash ci/tests/test_auto_merge_upstream_mr.sh
     - bash ci/tests/test_renovate_serial_loop.sh
+    - bash ci/tests/test_gitlab_telegram_release.sh
+    - bash ci/tests/test_linux_release_template.sh
 
 cancel:older:mr:pipelines:
   image: alpine:3.22
