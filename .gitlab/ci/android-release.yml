@@ -373,9 +373,15 @@
       : "${MAGISK_ANDROID_RELEASE_MODULES_REPO:?MAGISK_ANDROID_RELEASE_MODULES_REPO is required}"
       : "${XPOSED_MODULES_REPO_TOKEN:?XPOSED_MODULES_REPO_TOKEN is required}"
 
-      mapfile -d '' apk_files < <(find app/build/outputs/apk -type f -path '*/release/*.apk' -print0 | sort -z)
+      apk_roots="${MAGISK_ANDROID_RELEASE_APK_ROOTS:-app/build/outputs/apk}"
+      mapfile -d '' apk_files < <(
+        for root in $apk_roots; do
+          [ -d "$root" ] || continue
+          find "$root" -type f -path '*/release/*.apk' -print0
+        done | sort -z
+      )
       if [ "${#apk_files[@]}" -eq 0 ]; then
-        echo "ERROR: no release APK files found under app/build/outputs/apk" >&2
+        echo "ERROR: no release APK files found under: ${apk_roots}" >&2
         exit 1
       fi
 
@@ -478,12 +484,16 @@
 
       find_apks() {
         local pattern="$1"
-        find app/build/outputs/apk -type f -name "$pattern" -path '*/release/*' -print | sort
+        local root
+        for root in ${MAGISK_ANDROID_RELEASE_APK_ROOTS:-app/build/outputs/apk}; do
+          [ -d "$root" ] || continue
+          find "$root" -type f -name "$pattern" -path '*/release/*' -print
+        done | sort
       }
 
       mapfile -t apk_files < <(find_apks "${MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN}")
       if [[ "${#apk_files[@]}" -eq 0 ]]; then
-        echo "ERROR: no release APKs matched '${MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN}' under app/build/outputs/apk" >&2
+        echo "ERROR: no release APKs matched '${MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN}' under: ${MAGISK_ANDROID_RELEASE_APK_ROOTS:-app/build/outputs/apk}" >&2
         exit 1
       fi
       echo "Publishing ${#apk_files[@]} asset(s) to ${github_repo}"

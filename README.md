@@ -319,6 +319,9 @@ Common variables:
   finishes, before any publisher job can consume the artifacts.
 - `MAGISK_ANDROID_RELEASE_APK_ROOTS`: space-separated APK output roots when a
   project packages more than one Android application, such as MiPushFramework.
+  Defaults to `app/build/outputs/apk`. Consumed by `.magisk_android_release_apk`
+  (signature validation), `.magisk_android_release_github` and
+  `.magisk_android_publish_modules_repo` (release asset collection).
 - `RELEASE_KEYSTORE`, `STORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`: signing
   credentials. `RELEASE_KEYSTORE` is a base64-encoded keystore. Release APK and
   AAB jobs require all four values and pass an absolute, mode-`0600` keystore

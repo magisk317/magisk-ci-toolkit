@@ -24,6 +24,14 @@ apk_release="$(extract_template '.magisk_android_release_apk')"
 [[ "$apk_release" == *'validate_android_apk_signatures.sh'* ]] || fail "APK signer validation is missing"
 
 for name in \
+  '.magisk_android_release_github' \
+  '.magisk_android_publish_modules_repo'; do
+  block="$(extract_template "$name")"
+  [[ "$block" == *'MAGISK_ANDROID_RELEASE_APK_ROOTS'* ]] || fail "$name must honor MAGISK_ANDROID_RELEASE_APK_ROOTS"
+  [[ "$block" != *'find app/build/outputs/apk'* ]] || fail "$name must not hardcode app/build/outputs/apk"
+done
+
+for name in \
   '.magisk_android_release_guard' \
   '.magisk_android_gitlab_release' \
   '.magisk_android_publish_play' \
