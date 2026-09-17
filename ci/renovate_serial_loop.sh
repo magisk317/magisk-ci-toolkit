@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly HARD_MAX_ROUNDS=10
+readonly HARD_MAX_ROUNDS=50
 readonly DEFAULT_POLL_INTERVAL_SECONDS=5
 readonly DEFAULT_MAX_POLLS=120
 readonly DEFAULT_NO_MR_GRACE_POLLS=3
