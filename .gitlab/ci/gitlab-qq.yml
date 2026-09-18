@@ -21,7 +21,7 @@
     MAGISK_GITLAB_QQ_ARTIFACT_PATTERNS: "*arm64-v8a*.apk"
     MAGISK_GITLAB_QQ_RELEASE_ARTIFACT_PATTERNS: "*arm64-v8a*.apk"
     MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
-    MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/magisk-ci-toolkit.git"
+    MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git"
   before_script:
     - apk add --no-cache bash coreutils curl findutils git jq openssl
     - |

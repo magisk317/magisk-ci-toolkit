@@ -52,7 +52,7 @@
         ref="$MAGISK_CI_TOOLKIT_REF"
       fi
       toolkit_dir="${MAGISK_CI_TOOLKIT_DIR:-$CI_PROJECT_DIR/.magisk-ci-toolkit}"
-      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
       case "$toolkit_repository" in
         https://gitlab.com/*)
           if [ -n "${CI_JOB_TOKEN:-}" ]; then
@@ -91,8 +91,8 @@
       tmp="$(mktemp -d)"
       if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
         git init --quiet "$tmp/toolkit"
-        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
-        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
         if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
           toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
           git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
@@ -590,7 +590,7 @@
         ref="$MAGISK_CI_TOOLKIT_REF"
       fi
       toolkit_dir="${MAGISK_CI_TOOLKIT_DIR:-$CI_PROJECT_DIR/.magisk-ci-toolkit}"
-      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
       case "$toolkit_repository" in
         https://gitlab.com/*)
           if [ -n "${CI_JOB_TOKEN:-}" ]; then
@@ -631,8 +631,8 @@
       tmp="$(mktemp -d)"
       if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
         git init --quiet "$tmp/toolkit"
-        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
-        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
         if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
           toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
           git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
@@ -1235,8 +1235,8 @@
       tmp="$(mktemp -d)"
       if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
         git init --quiet "$tmp/toolkit"
-        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
-        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
         if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
           toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
           git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"
@@ -1256,8 +1256,8 @@
       fi
       tmp="$(mktemp -d)"
       git init --quiet "$tmp/toolkit"
-      git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
-      toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/magisk-ci-toolkit.git}"
+      git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+      toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
       if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
         toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
         git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"

@@ -56,7 +56,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       - name: Resolve CI toolkit
-        run: git clone --depth 1 --branch master https://gitlab.com/magisk3171/magisk-ci-toolkit.git .magisk-ci-toolkit
+        run: git clone --depth 1 --branch main https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git .magisk-ci-toolkit
       - name: Setup Android CI
         uses: ./.magisk-ci-toolkit/.github/actions/setup-android-ci
         with:
@@ -92,7 +92,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       - name: Resolve CI toolkit
-        run: git clone --depth 1 --branch master https://gitlab.com/magisk3171/magisk-ci-toolkit.git .magisk-ci-toolkit
+        run: git clone --depth 1 --branch main https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git .magisk-ci-toolkit
       - name: Setup Android CI
         uses: ./.magisk-ci-toolkit/.github/actions/setup-android-ci
         with:
@@ -157,7 +157,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       - name: Resolve CI toolkit
-        run: git clone --depth 1 --branch master https://gitlab.com/magisk3171/magisk-ci-toolkit.git .magisk-ci-toolkit
+        run: git clone --depth 1 --branch main https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git .magisk-ci-toolkit
       - name: Setup Android CI
         uses: ./.magisk-ci-toolkit/.github/actions/setup-android-ci
         with:
