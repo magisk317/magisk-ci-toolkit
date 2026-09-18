@@ -563,34 +563,38 @@
       # the name Xposed-Modules-Repo expects. The subsequent `gh release create`
       # then just attaches the release to a tag that already exists.
       #
-      # This block is best-effort: any failure downgrades to a WARN so the
-      # release still publishes (set -euo pipefail is active in this script).
+      # This block is mandatory: any failure aborts the job before the release
+      # is created. Degrading to a WARN used to let GitHub mint an unsigned
+      # lightweight tag on the stale default-branch HEAD, which lost the
+      # signature and back-dated release.created_at to the HEAD commit date.
       modules_signed_tag_src="refs/tags/${CI_COMMIT_TAG}"
       if ! git rev-parse --git-dir >/dev/null 2>&1; then
-        echo "WARN: not a git checkout, skipping signed tag push to Xposed-Modules-Repo" >&2
-      elif [ "$(git cat-file -t "$modules_signed_tag_src" 2>/dev/null || true)" != "tag" ]; then
-        echo "WARN: ${modules_signed_tag_src} is missing or not an annotated tag; skipping signed tag push (XMR tag ${modules_release_tag} will stay unsigned)" >&2
-      elif ! git cat-file -p "$modules_signed_tag_src" 2>/dev/null | grep -q '^-----BEGIN PGP SIGNATURE-----$'; then
-        echo "WARN: ${modules_signed_tag_src} carries no PGP signature; skipping signed tag push" >&2
-      elif gh release view "$modules_release_tag" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
+        echo "ERROR: not a git checkout; cannot push the signed tag to Xposed-Modules-Repo" >&2
+        exit 1
+      fi
+      if [ "$(git cat-file -t "$modules_signed_tag_src" 2>/dev/null || true)" != "tag" ]; then
+        echo "ERROR: ${modules_signed_tag_src} is missing or not an annotated tag; refusing to publish an unsigned XMR tag" >&2
+        exit 1
+      fi
+      if ! git cat-file -p "$modules_signed_tag_src" 2>/dev/null | grep -q '^-----BEGIN PGP SIGNATURE-----$'; then
+        echo "ERROR: ${modules_signed_tag_src} carries no PGP signature; refusing to publish an unsigned XMR tag" >&2
+        exit 1
+      fi
+      if gh release view "$modules_release_tag" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
         echo "Xposed-Modules-Repo release ${modules_release_tag} already exists; leaving its tag untouched"
       else
         modules_push_repo="${MAGISK_ANDROID_RELEASE_MODULES_REPO#https://github.com/}"
         modules_push_repo="${modules_push_repo#http://github.com/}"
         modules_push_url="https://x-access-token:${XPOSED_MODULES_REPO_TOKEN}@github.com/${modules_push_repo}"
         modules_push_err="$(mktemp)"
-        if git push --quiet "$modules_push_url" \
+        if git push --force --quiet "$modules_push_url" \
              "refs/tags/${CI_COMMIT_TAG}:refs/tags/${modules_release_tag}" 2>"$modules_push_err"; then
           echo "Pushed signed tag ${modules_release_tag} (from ${CI_COMMIT_TAG}) to ${modules_push_repo}"
         else
-          # A rejection usually means the tag already exists remotely (for example
-          # it was minted unsigned by an earlier run). That is not fatal: skip and
-          # let the release publish, but do not mask unexpected transport errors.
-          if grep -Eqi 'already exists|fetch first|non-fast-forward|stale info|\[rejected\]' "$modules_push_err"; then
-            echo "WARN: XMR tag ${modules_release_tag} already exists remotely; leaving it as-is and continuing" >&2
-          else
-            echo "WARN: failed to push signed tag ${modules_release_tag} to ${modules_push_repo}; continuing without it" >&2
-          fi
+          # The release is only created once the signed tag object is
+          # verifiably in place; any push failure aborts the job so the
+          # operator can retry instead of shipping an unsigned stale tag.
+          echo "ERROR: failed to push signed tag ${modules_release_tag} to ${modules_push_repo}" >&2
         fi
         # Never echo the authenticated URL or the token itself.
         # Redact defensively: first strip the token sentinel wherever it appears,
