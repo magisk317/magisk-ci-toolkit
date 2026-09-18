@@ -51,3 +51,20 @@ if (cd "$tmp_dir/repo" && MAGISK_PLAY_TRACK_OVERRIDE=unsupported CI_PIPELINE_IID
 fi
 
 echo 'PASS: Play release resolution cases'
+
+# Contract: the review gate must read the real lifecycle from the read-only
+# per-track releases endpoint (the legacy edits->tracks listing keeps
+# reporting "completed" for a submission that is still in review, so it can
+# never gate anything), apply on every track, and tolerate the endpoint's
+# transient empty responses.
+resolver="$script_dir/../resolve_play_release.sh"
+grep -Fq '/tracks/${track}/releases' "$resolver" || { echo 'FAIL: resolver must query the per-track releases endpoint' >&2; exit 1; }
+grep -Fq 'RELEASE_LIFECYCLE_STATE_' "$resolver" || { echo 'FAIL: resolver must strip the lifecycle state prefix' >&2; exit 1; }
+grep -Fq 'MAGISK_PLAY_SKIP_STATUSES:-IN_REVIEW APPROVED_NOT_PUBLISHED' "$resolver" || { echo 'FAIL: default skip states must be IN_REVIEW and APPROVED_NOT_PUBLISHED' >&2; exit 1; }
+grep -Fq 'incomplete body' "$resolver" || { echo 'FAIL: resolver must retry the transient empty releases response' >&2; exit 1; }
+if grep -Fq '[[ "$track" == beta' "$resolver"; then
+  echo 'FAIL: the review gate must not be restricted to the beta track' >&2
+  exit 1
+fi
+
+echo 'PASS: Play release gate contract'

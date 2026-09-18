@@ -148,30 +148,51 @@ PY
         curl -fsS -X DELETE -H "Authorization: Bearer $access_token" "$api_root/$edit_id" >/dev/null 2>&1 || true
         if [[ -n "$tracks_json" ]]; then
           play_max="$(printf '%s' "$tracks_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); v=[int(x) for t in d.get("tracks",[]) for r in t.get("releases",[]) for x in r.get("versionCodes",[])]; print(max(v) if v else "")')"
-          # Resolve the review status of the *target* track's current release.
-          # "inProgress" means a submission is still in Play review; we use this
-          # to gate beta publishes so we don't pile up submissions (压审核).
-          track_status="$(printf '%s' "$tracks_json" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-target = sys.argv[1]
-best_status = ""
-best_vc = -1
-for t in d.get("tracks", []):
-    if t.get("track") != target:
-        continue
-    for r in t.get("releases", []):
-        vcs = r.get("versionCodes", [])
-        if not vcs:
-            continue
-        mx = max(int(x) for x in vcs)
-        if mx > best_vc:
-            best_vc = mx
-            best_status = r.get("status", "")
-print(best_status)
-' "$track")"
           play_query_status=success
         fi
+      fi
+      # Resolve the real review lifecycle of the target track's latest release
+      # via the read-only per-track releases endpoint. The legacy edits->tracks
+      # listing only echoes the configured release_status: a submission made
+      # with release_status=completed keeps reporting "completed" while it is
+      # still in review (or waiting in a managed publishing queue), so it can
+      # never gate anything. This endpoint exposes releaseLifecycleState
+      # (IN_REVIEW / APPROVED_NOT_PUBLISHED / PUBLISHED / ...), which is the
+      # source of truth for "has the previous release gone live yet?".
+      # The endpoint occasionally returns a transient empty {} body; retry.
+      releases_url="https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${package_name}/tracks/${track}/releases"
+      releases_json=''
+      for _attempt in 1 2 3; do
+        releases_status="$(curl -sS --retry 2 -H "Authorization: Bearer $access_token" \
+          -o "$api_response" -w '%{http_code}' "$releases_url")" || releases_status=000
+        if [[ "$releases_status" =~ ^2[0-9][0-9]$ ]]; then
+          releases_json="$(cat "$api_response")"
+          if printf '%s' "$releases_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d,dict) and "releases" in d else 1)' 2>/dev/null; then
+            break
+          fi
+          echo "WARN: Play releases API returned an incomplete body (attempt $_attempt/3) for $package_name track $track" >&2
+          releases_json=''
+          sleep 2
+        else
+          echo "WARN: Play releases API returned HTTP $releases_status for $package_name track $track" >&2
+          releases_json=''
+          break
+        fi
+      done
+      if [[ -n "$releases_json" ]]; then
+        track_status="$(printf '%s' "$releases_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+best_status = ""
+best_vc = -1
+for r in d.get("releases", []) or []:
+    vcs = [a.get("versionCode") for a in (r.get("activeArtifacts") or []) if isinstance(a.get("versionCode"), int)]
+    mx = max(vcs) if vcs else 0
+    if mx > best_vc:
+        best_vc = mx
+        best_status = r.get("releaseLifecycleState", "")
+print(best_status.removeprefix("RELEASE_LIFECYCLE_STATE_") if best_status else "")
+')"
       fi
     fi
   fi
@@ -190,14 +211,16 @@ else
   echo "WARN: Play version query unavailable for $package_name; using fallback versionCode=$version_code" >&2
 fi
 
-# Beta-only review gate. If the beta track already has a release in review
-# (status "inProgress"), flag the publish step to skip so we don't pile up
-# submissions and pressure Play review. Production/tag releases are not gated
-# (they target a different track and don't conflict). Override the matched
-# statuses via MAGISK_PLAY_SKIP_STATUSES if needed.
-skip_statuses="${MAGISK_PLAY_SKIP_STATUSES:-inProgress}"
+# Review gate, effective on every Play track (beta, production, alpha, ...).
+# If the latest release on the target track has not gone live yet — it is
+# still in review (IN_REVIEW) or approved but waiting for a managed publish
+# (APPROVED_NOT_PUBLISHED) — flag the publish step to skip so we don't pile
+# up submissions and pressure Play review. Rejected releases (NOT_APPROVED)
+# and fully live releases (PUBLISHED) do not block. Override the matched
+# states via MAGISK_PLAY_SKIP_STATUSES if needed.
+skip_statuses="${MAGISK_PLAY_SKIP_STATUSES:-IN_REVIEW APPROVED_NOT_PUBLISHED}"
 play_skip_release=0
-if [[ "$track" == beta && -n "$track_status" && " $skip_statuses " == *" $track_status "* ]]; then
+if [[ -n "$track_status" && " $skip_statuses " == *" $track_status "* ]]; then
   play_skip_release=1
 fi
 

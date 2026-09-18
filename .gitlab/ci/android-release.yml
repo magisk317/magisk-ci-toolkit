@@ -307,6 +307,14 @@
         set +a
       fi
 
+      # Review gate: skip the submission when the latest release on the target
+      # track is still in review or waiting for a managed publish. The flag is
+      # produced by resolve_play_release.sh (see play-release.env).
+      if [[ "${MAGISK_PLAY_SKIP_RELEASE:-0}" == "1" ]]; then
+        echo "SKIP_PLAY: track '${MAGISK_PLAY_TRACK}' latest release state='${MAGISK_PLAY_TRACK_STATUS:-unknown}' (in review / not live yet); skipping this submission to avoid review pile-up."
+        exit 0
+      fi
+
       release_track="$MAGISK_PLAY_TRACK"
       metadata_path=''
       for candidate in \

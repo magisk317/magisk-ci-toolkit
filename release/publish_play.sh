@@ -33,11 +33,12 @@ esac
 
 release_env_file="${MAGISK_RELEASE_ENV_FILE:-play-release-status.env}"
 
-# Beta review gate: if resolve_play_release.sh flagged the beta track as already
-# in review (status "inProgress"), skip the upload instead of piling up submissions
-# and pressuring Play review. Production/tag publishes do not set this flag.
+# Review gate: if resolve_play_release.sh flagged the target track's latest
+# release as not live yet (IN_REVIEW / APPROVED_NOT_PUBLISHED lifecycle
+# states), skip the upload instead of piling up submissions and pressuring
+# Play review. Effective on every track, including production.
 if [[ "${MAGISK_PLAY_SKIP_RELEASE:-0}" == "1" ]]; then
-  echo "INFO: Play beta track already in review (status='${MAGISK_PLAY_TRACK_STATUS:-unknown}'); skipping publish to avoid review pile-up." >&2
+  echo "INFO: Play track '${MAGISK_PLAY_TRACK}' latest release not live yet (state='${MAGISK_PLAY_TRACK_STATUS:-unknown}'); skipping publish to avoid review pile-up." >&2
   {
     printf 'MAGISK_RELEASE_TRACK=%q\n' "$MAGISK_PLAY_TRACK"
     printf 'MAGISK_RELEASE_VERSION_NAME=%q\n' "$MAGISK_PLAY_VERSION_NAME"
