@@ -54,6 +54,96 @@ delete_local_tag_if_exists() {
   fi
 }
 
+# Find the protected-tag rule matching a tag name, if any.
+# GitLab matches protected-tag names as globs (e.g. "v*"), so mirror that here.
+find_matching_protected_tag() {
+  local root_dir="$1"
+  local tag_name="$2"
+
+  local rules
+  if ! rules="$(cd "$root_dir" && glab api "projects/:fullpath/protected_tags" 2>/dev/null)"; then
+    return 1
+  fi
+  [[ -n "$rules" && "$rules" != "null" ]] || return 1
+
+  PROTECTED_TAG_RULE="$(
+    printf '%s' "$rules" | python3 -c '
+import fnmatch, json, sys
+tag = sys.argv[1]
+try:
+    rules = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for rule in rules or []:
+    if fnmatch.fnmatchcase(tag, rule.get("name", "")):
+        print(json.dumps(rule))
+        break
+' "$tag_name"
+  )"
+  [[ -n "$PROTECTED_TAG_RULE" ]]
+}
+
+# Temporarily drop a protected-tag rule so the tag can be deleted, then put it
+# back. GitLab only allows removing protected tags through the API/web UI, so a
+# plain `git push :refs/tags/<tag>` is rejected while the rule is in place.
+with_protected_tag_unlocked() {
+  local root_dir="$1"
+  local tag_name="$2"
+  shift 2
+
+  local rule_json
+  if ! find_matching_protected_tag "$root_dir" "$tag_name"; then
+    "$@"   # no rule matches: run the command directly
+    return $?
+  fi
+  rule_json="$PROTECTED_TAG_RULE"
+
+  local rule_name
+  rule_name="$(printf '%s' "$rule_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+
+  echo "WARN: protected-tag rule '$rule_name' covers $tag_name; temporarily lifting it" >&2
+
+  local restore_needed=true
+  restore_protected_tag() {
+    if [[ "$restore_needed" == "true" ]]; then
+      echo "Restoring protected-tag rule: $rule_name" >&2
+      # Rebuild the rule from --field arguments: `glab api --input -` sends no
+      # JSON content type and GitLab answers HTTP 415, silently leaving the tag
+      # unprotected.
+      local -a fields=(--field "name=$rule_name")
+      local level
+      while IFS= read -r level; do
+        [[ -n "$level" ]] && fields+=(--field "create_access_level=$level")
+      done < <(printf '%s' "$rule_json" | python3 -c '
+import json, sys
+rule = json.load(sys.stdin)
+for entry in rule.get("create_access_levels") or []:
+    level = entry.get("access_level")
+    if level is not None:
+        print(level)
+')
+      if ! (cd "$root_dir" && glab api --method POST "projects/:fullpath/protected_tags" "${fields[@]}") >/dev/null; then
+        echo "WARN: failed to restore protected-tag rule '$rule_name'" >&2
+      fi
+    fi
+  }
+  trap restore_protected_tag EXIT
+
+  if ! (cd "$root_dir" && glab api --method DELETE "projects/:fullpath/protected_tags/$rule_name") >/dev/null; then
+    echo "ERROR: failed to lift protected-tag rule '$rule_name'" >&2
+    return 1
+  fi
+
+  local status=0
+  "$@" || status=$?
+
+  restore_protected_tag
+  restore_needed=false
+  trap - EXIT
+
+  return "$status"
+}
+
 # Delete remote tag if it exists
 delete_remote_tag_if_exists() {
   local root_dir="$1"
@@ -69,7 +159,8 @@ delete_remote_tag_if_exists() {
   remote_ref="$(printf '%s\n' "$remote_output" | awk '{print $1}' | head -n1)"
   if [[ -n "$remote_ref" ]]; then
     echo "WARN: remote tag exists, deleting before retag: $tag_name ($remote_ref)"
-    if ! git -C "$root_dir" push "$remote_name" ":refs/tags/$tag_name"; then
+    if ! with_protected_tag_unlocked "$root_dir" "$tag_name" \
+        git -C "$root_dir" push "$remote_name" ":refs/tags/$tag_name"; then
       echo "ERROR: failed to delete remote tag $tag_name from $remote_name" >&2
       exit 1
     fi
@@ -132,7 +223,9 @@ create_signed_tag() {
   # The tag push owns the release pipeline. Avoid creating a redundant branch
   # pipeline for the same release commit immediately beforehand.
   push_release_branch "$root_dir" "$remote_name" "$current_branch" || return $?
-  git -C "$root_dir" push "$remote_name" "$tag_name"
+  # --force so a pre-existing (possibly protected) tag cannot block the release
+  # once delete_remote_tag_if_exists has had its chance to clear it.
+  git -C "$root_dir" push --force "$remote_name" "$tag_name"
 }
 
 # Core release tag logic — call this from your repo's wrapper script
