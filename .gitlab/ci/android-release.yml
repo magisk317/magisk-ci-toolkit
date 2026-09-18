@@ -421,6 +421,12 @@
 # channel tag is derived here instead of reusing the "v<versionName>" tag that
 # the GitLab and GitHub releases use.
 #
+# The release tag pushed to Xposed-Modules-Repo is the pre-signed annotated tag
+# object from this pipeline (pushed as refs/tags/<versionCode>-<versionName>), so
+# the mirror carries a GPG-signed tag instead of the unsigned lightweight tag that
+# `gh release create` would mint server-side. If no signed tag object is
+# available the push is skipped with a warning and publishing still proceeds.
+#
 # Requires:
 #   MAGISK_ANDROID_RELEASE_PACKAGE_NAME  (from the project .gitlab-ci.yml)
 #   MAGISK_ANDROID_RELEASE_MODULES_REPO  (from the project .gitlab-ci.yml)
@@ -540,6 +546,61 @@
           --generate-github-notes \
           --output release-notes.md
       export GH_TOKEN="$XPOSED_MODULES_REPO_TOKEN"
+
+      # Push the already-signed annotated tag object to Xposed-Modules-Repo
+      # before creating the release.
+      #
+      # Why the mirror tag used to be unsigned: `gh release create <tag>` is a
+      # pure API call. When the tag does not exist on the target repo GitHub
+      # creates it server-side as a lightweight tag pointing at a throwaway
+      # empty-tree commit authored by github-actions[bot]. No GPG key is
+      # involved anywhere on that path, so XMR ends up with an unsigned tag.
+      #
+      # Why pushing the tag object fixes it: a `git tag -s` annotated tag is a
+      # real object of type "tag" whose body embeds the OpenPGP signature. A
+      # plain `git push <remote> refs/tags/<src>:refs/tags/<dst>` transfers that
+      # object verbatim, so the remote receives the identical signed tag under
+      # the name Xposed-Modules-Repo expects. The subsequent `gh release create`
+      # then just attaches the release to a tag that already exists.
+      #
+      # This block is best-effort: any failure downgrades to a WARN so the
+      # release still publishes (set -euo pipefail is active in this script).
+      modules_signed_tag_src="refs/tags/${CI_COMMIT_TAG}"
+      if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "WARN: not a git checkout, skipping signed tag push to Xposed-Modules-Repo" >&2
+      elif [ "$(git cat-file -t "$modules_signed_tag_src" 2>/dev/null || true)" != "tag" ]; then
+        echo "WARN: ${modules_signed_tag_src} is missing or not an annotated tag; skipping signed tag push (XMR tag ${modules_release_tag} will stay unsigned)" >&2
+      elif ! git cat-file -p "$modules_signed_tag_src" 2>/dev/null | grep -q '^-----BEGIN PGP SIGNATURE-----$'; then
+        echo "WARN: ${modules_signed_tag_src} carries no PGP signature; skipping signed tag push" >&2
+      elif gh release view "$modules_release_tag" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
+        echo "Xposed-Modules-Repo release ${modules_release_tag} already exists; leaving its tag untouched"
+      else
+        modules_push_repo="${MAGISK_ANDROID_RELEASE_MODULES_REPO#https://github.com/}"
+        modules_push_repo="${modules_push_repo#http://github.com/}"
+        modules_push_url="https://x-access-token:${XPOSED_MODULES_REPO_TOKEN}@github.com/${modules_push_repo}"
+        modules_push_err="$(mktemp)"
+        if git push --quiet "$modules_push_url" \
+             "refs/tags/${CI_COMMIT_TAG}:refs/tags/${modules_release_tag}" 2>"$modules_push_err"; then
+          echo "Pushed signed tag ${modules_release_tag} (from ${CI_COMMIT_TAG}) to ${modules_push_repo}"
+        else
+          # A rejection usually means the tag already exists remotely (for example
+          # it was minted unsigned by an earlier run). That is not fatal: skip and
+          # let the release publish, but do not mask unexpected transport errors.
+          if grep -Eqi 'already exists|fetch first|non-fast-forward|stale info|\[rejected\]' "$modules_push_err"; then
+            echo "WARN: XMR tag ${modules_release_tag} already exists remotely; leaving it as-is and continuing" >&2
+          else
+            echo "WARN: failed to push signed tag ${modules_release_tag} to ${modules_push_repo}; continuing without it" >&2
+          fi
+        fi
+        # Never echo the authenticated URL or the token itself.
+        # Redact defensively: first strip the token sentinel wherever it appears,
+      # then normalise any credential-bearing URL. Doing the token substitution
+      # first means a token echoed outside a URL-shaped context is still caught.
+      sed -e "s#${XPOSED_MODULES_REPO_TOKEN}#<redacted>#g" \
+          -e 's#https://[^@[:space:]]*@#https://<redacted>@#g' \
+          "$modules_push_err" >&2 || true
+        rm -f "$modules_push_err"
+      fi
 
       if gh release view "$modules_release_tag" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
         gh release upload "$modules_release_tag" "${apk_files[@]}" \
