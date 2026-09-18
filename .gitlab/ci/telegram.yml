@@ -516,6 +516,7 @@
       project_tag="${MAGISK_TELEGRAM_PROJECT_TAG:-#$CI_PROJECT_NAME}"
       version_tag="$(telegram_version_hashtag)"
       tag_line="${project_tag}${version_tag:+ $version_tag}"
+      event_tag="${MAGISK_TELEGRAM_EVENT_TAG:-#CI}"
       commit_title="${CI_COMMIT_TITLE:-${CI_COMMIT_MESSAGE:-}}"
       commit_title=$(printf %s "$commit_title" | head -n 1)
       if [ -n "${CI_COMMIT_SHA:-}" ] && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
@@ -536,6 +537,9 @@
       ci_msg="$title_line"
       if [ -n "$tag_line" ]; then
         ci_msg+=$'\n'"$(telegram_html_escape "$tag_line")"
+      fi
+      if [ -n "$event_tag" ]; then
+        ci_msg+=$'\n'"$(telegram_html_escape "$event_tag")"
       fi
       if [ -n "$commit_title" ]; then
         ci_msg+=$'\n'"📋 $(telegram_html_link "$CI_PIPELINE_URL" "$commit_title")"
@@ -1107,6 +1111,7 @@
       project_tag="${MAGISK_TELEGRAM_PROJECT_TAG:-#$CI_PROJECT_NAME}"
       version_tag="$(telegram_version_hashtag)"
       tag_line="${project_tag}${version_tag:+ $version_tag}"
+      event_tag="${MAGISK_TELEGRAM_EVENT_TAG:-#release}"
       release_tag="${CI_COMMIT_TAG:-manual}"
       release_url="${CI_PROJECT_URL}/-/releases/${release_tag}"
       release_notes_source="${MAGISK_TELEGRAM_RELEASE_NOTES_SOURCE:-docs/CHANGELOG.md}"
@@ -1165,10 +1170,27 @@
       if [ -n "$tag_line" ]; then
         release_head+=$'\n'"$(telegram_html_escape "$tag_line")"
       fi
+      if [ -n "$event_tag" ]; then
+        release_head+=$'\n'"$(telegram_html_escape "$event_tag")"
+      fi
       release_head+=$'\n'"🔗 $(telegram_html_link "$release_url" "${MAGISK_TELEGRAM_RELEASE_GITLAB_LABEL:-GitLab}")"
       release_head+="$github_line"
       release_head+="$play_line"
       release_msg="$release_head"
+      # Backend container images, merged from the optional dotenv published by
+      # backend:container:manifest. Projects without that job simply skip this.
+      if [ "${MAGISK_TELEGRAM_IMAGE_PUBLISH_OK:-}" = "1" ] \
+        && [ -n "${MAGISK_TELEGRAM_IMAGE_LIST_COMMAND:-}" ]; then
+        image_lines="$(bash -c "${MAGISK_TELEGRAM_IMAGE_LIST_COMMAND}" 2>/dev/null || true)"
+        if [ -n "$image_lines" ]; then
+          image_block=""
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            image_block+="📦 $(telegram_html_escape "$line")"$'\n'
+          done <<<"$image_lines"
+          release_msg+=$'\n🖼 Images'$'\n'"${image_block%$'\n'}"
+        fi
+      fi
       if [ -n "$release_notes_content" ]; then
         release_msg+=$'\n\n'"$(telegram_html_escape "$release_notes_content")"
       fi
