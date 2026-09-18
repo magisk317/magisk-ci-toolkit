@@ -15,8 +15,8 @@ fi
 [[ "$#" -eq 2 ]] || usage
 consumer_root="$(cd "$1" && pwd)"
 toolkit_ref="$2"
-[[ "$toolkit_ref" =~ ^[0-9a-fA-F]{40}$ ]] || {
-  echo "toolkit-ref must be a full 40-character commit SHA" >&2
+[[ "$toolkit_ref" =~ ^[0-9a-fA-F]{40}$ || "$toolkit_ref" =~ ^v[0-9]+$ ]] || {
+  echo "toolkit-ref must be a full 40-character commit SHA or a v<n> tag" >&2
   exit 2
 }
 
