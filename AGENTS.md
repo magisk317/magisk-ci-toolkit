@@ -8,11 +8,14 @@ checkout, Android CI, release, security, notification, and code-generation behav
 
 ## Immutable Checkout Contract
 
-- Production consumers should pin the toolkit with one full 40-character commit SHA.
-- GitLab consumers must use that same SHA for both `include.ref` and the top-level
+- Production consumers should pin the toolkit with one immutable tag (for example `ref: v1`), not a
+  bare commit SHA: a SHA looks equally pinned but becomes unreachable the moment the toolkit history
+  is rewritten, which then breaks every consumer at once. Tags survive rewrites because the release
+  process re-points them.
+- GitLab consumers must use that same ref for both `include.ref` and the top-level
   `MAGISK_CI_TOOLKIT_REF`; otherwise the included YAML and the runtime checkout can drift apart.
-- Raw commit SHAs must be fetched directly and checked out detached. Do not pass them to
-  `git clone --branch`, and do not silently fall back from a missing SHA to `main` or another moving
+- Tags and full commit SHAs must be fetched directly and checked out detached. Do not pass them to
+  `git clone --branch`, and do not silently fall back from a missing ref to `main` or another moving
   ref.
 - Keep `ci/resolve_git_checkout.sh` and the bootstrap logic in `.gitlab/ci/android.yml` behaviorally
   aligned. Branches and tags remain supported for development and migration work.
