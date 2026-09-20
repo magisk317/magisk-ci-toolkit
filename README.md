@@ -249,6 +249,19 @@ packages can raise the sdkmanager channel with
 The templates resolve this toolkit into `.magisk-ci-toolkit` at runtime and call
 `gradle/run_gradle_with_retry.sh`, which retries transient dependency download
 and TLS failures up to three times before giving up.
+When the job environment exports proxy variables (`https_proxy`/`HTTPS_PROXY`,
+`http_proxy`/`HTTP_PROXY`, and `no_proxy`/`NO_PROXY`), the wrapper derives the
+matching JVM proxy system properties (`-Dhttps.proxyHost`,
+`-Dhttps.proxyPort`, `-Dhttp.proxyHost`, `-Dhttp.proxyPort`,
+`-Dhttp.nonProxyHosts`; `socks5://` maps to the `socksProxy*` properties) and
+passes them on the Gradle command line. Command-line `-D` flags reach the
+Gradle **daemon**, unlike `GRADLE_OPTS`, which only configures the client JVM —
+the daemon performs dependency resolution and ignores both `GRADLE_OPTS` and
+`HTTP_PROXY`-style variables. `no_proxy` entries are converted from the
+comma-separated environment form to the JVM's `|`-separated wildcard form, so
+hosts meant to stay direct (for example `repo.maven.apache.org`) keep bypassing
+the proxy. Jobs without proxy variables (GitHub-hosted runners) get no extra
+flags. Set `MAGISK_GRADLE_PROXY_DISABLE=1` to opt out explicitly.
 The runtime checkout accepts a branch, tag, or full commit SHA. Production consumers should pin an
 **immutable tag** (for example `ref: v1`), not a bare commit SHA: a SHA looks equally pinned but
 becomes unreachable the moment the toolkit history is rewritten, which then breaks every consumer at

@@ -23,19 +23,21 @@ shell:test:
   before_script:
     - apk add --no-cache bash curl jq shellcheck python3 openssl git
   script:
-    - bash -n ci/*.sh ci/tests/*.sh release/tests/*.sh
+    - bash -n ci/*.sh ci/tests/*.sh gradle/*.sh gradle/tests/*.sh release/tests/*.sh
     - >-
       shellcheck -x
       ci/cancel_older_mr_pipelines.sh
       ci/cancel_older_renovate_pipelines.sh
       ci/auto_merge_upstream_mr.sh
       ci/renovate_serial_loop.sh
+      gradle/run_gradle_with_retry.sh
       ci/tests/test_cancel_older_mr_pipelines.sh
       ci/tests/test_cancel_older_renovate_pipelines.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_renovate_serial_loop.sh
       ci/tests/test_gitlab_telegram_release.sh
       ci/tests/test_linux_release_template.sh
+      gradle/tests/test_run_gradle_with_retry.sh
       release/tests/test_release_notes.sh
       release/tests/test_modules_repo_tag.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
@@ -44,6 +46,7 @@ shell:test:
     - bash ci/tests/test_renovate_serial_loop.sh
     - bash ci/tests/test_gitlab_telegram_release.sh
     - bash ci/tests/test_linux_release_template.sh
+    - bash gradle/tests/test_run_gradle_with_retry.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_modules_repo_tag.sh
 

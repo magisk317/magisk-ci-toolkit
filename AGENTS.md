@@ -21,12 +21,13 @@ checkout, Android CI, release, security, notification, and code-generation behav
 
 ## Verification
 
-Run the focused shell contracts after changing checkout or code-generation helpers:
+Run the focused shell contracts after changing checkout, Gradle, or code-generation helpers:
 
 ```bash
 bash ci/tests/test_resolve_git_checkout.sh
 bash ci/tests/test_resolve_pnpm_version.sh
 bash ci/tests/test_ensure_pnpm.sh
+bash gradle/tests/test_run_gradle_with_retry.sh
 bash codegen/tests/test_badges.sh
 git diff --check
 ```
