@@ -9,6 +9,11 @@ workflow:
 
 default:
   interruptible: true
+  # Route every job to the self-hosted group runners (magisk3171 group).
+  # Shared GitLab.com SaaS runners are disabled on this project. These jobs are
+  # alpine-based and architecture-agnostic, so they run on the amd64 runner.
+  tags:
+    - magisk-amd64-linux
 
 stages:
   - test
