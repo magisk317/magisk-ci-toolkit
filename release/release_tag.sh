@@ -56,13 +56,20 @@ delete_local_tag_if_exists() {
 
 # Find the protected-tag rule matching a tag name, if any.
 # GitLab matches protected-tag names as globs (e.g. "v*"), so mirror that here.
+# Return codes: 0 = rule found (PROTECTED_TAG_RULE set); 1 = API answered but no
+# rule matches this tag; 2 = could not determine (API/parse failure). Callers
+# MUST treat 2 as fatal: a blind push at a possibly-protected tag just bounces
+# off GitLab's pre-receive hook.
 find_matching_protected_tag() {
   local root_dir="$1"
   local tag_name="$2"
 
   local rules
-  if ! rules="$(cd "$root_dir" && glab api "projects/:fullpath/protected_tags" 2>/dev/null)"; then
-    return 1
+  if ! rules="$(cd "$root_dir" && glab api "projects/:fullpath/protected_tags" 2>&1)"; then
+    echo "ERROR: cannot query protected tags via glab api. glab output:" >&2
+    printf '%s\n' "$rules" | head -3 >&2
+    echo "HINT: check 'glab auth status' and HTTPS reachability of the GitLab host (export https_proxy where required)." >&2
+    return 2
   fi
   [[ -n "$rules" && "$rules" != "null" ]] || return 1
 
@@ -73,13 +80,16 @@ tag = sys.argv[1]
 try:
     rules = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(3)
 for rule in rules or []:
     if fnmatch.fnmatchcase(tag, rule.get("name", "")):
         print(json.dumps(rule))
         break
 ' "$tag_name"
-  )"
+  )" || {
+    echo "ERROR: cannot parse protected-tags API response" >&2
+    return 2
+  }
   [[ -n "$PROTECTED_TAG_RULE" ]]
 }
 
@@ -91,9 +101,13 @@ with_protected_tag_unlocked() {
   local tag_name="$2"
   shift 2
 
-  local rule_json
-  if ! find_matching_protected_tag "$root_dir" "$tag_name"; then
-    "$@"   # no rule matches: run the command directly
+  local rule_json rc=0
+  find_matching_protected_tag "$root_dir" "$tag_name" || rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    # Fail closed: protection state unknown, so do NOT blind-push.
+    return 1
+  elif [[ "$rc" -ne 0 ]]; then
+    "$@"   # API answered, no rule matches: run the command directly
     return $?
   fi
   rule_json="$PROTECTED_TAG_RULE"
