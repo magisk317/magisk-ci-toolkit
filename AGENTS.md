@@ -22,6 +22,19 @@ checkout, Android CI, release, security, notification, and code-generation behav
 - Treat the checkout destination as resolver-owned scratch state. Preserve exact-ref verification
   and update the configured `origin` when reusing an existing checkout.
 
+## Release Channel Semantics
+
+- Play publishing is best-effort by template policy: `.magisk_android_publish_play` sets
+  `allow_failure: true`. A Play-side block (policy review, permission declaration, track rejection) is
+  environmental, not a code defect — it must not fail the release pipeline or gate the Telegram
+  notification. `release/publish_play.sh` always records `MAGISK_RELEASE_STATUS`
+  (`published` / `skipped` / `failed`, plus `MAGISK_RELEASE_FAIL_REASON` on failure) in the release env
+  file, so an orange job keeps a machine-readable explanation.
+- The notify layer must not depend on the publish layer in the DAG: telegram jobs must not `needs`
+  release jobs (`*:release:*`). Failure propagation between release channels is each job's own
+  `allow_failure` semantics, never the pipeline graph. Consumers keep their own `needs` wiring (job
+  names differ per project); this repository owns the job-level semantics and the audit trail.
+
 ## Verification
 
 Run the focused shell contracts after changing checkout, Gradle, or code-generation helpers:
@@ -33,6 +46,13 @@ bash ci/tests/test_ensure_pnpm.sh
 bash gradle/tests/test_run_gradle_with_retry.sh
 bash codegen/tests/test_badges.sh
 git diff --check
+```
+
+After changing release templates or `release/publish_play.sh`, also run the release contracts:
+
+```bash
+bash ci/tests/test_linux_release_template.sh
+bash release/tests/test_publish_play.sh
 ```
 
 The pnpm helpers (`ci/resolve_pnpm_version.sh`, `ci/ensure_pnpm.sh`) treat the `packageManager`

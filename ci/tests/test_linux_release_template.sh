@@ -23,6 +23,9 @@ linux_base="$(extract_template '.magisk_linux_base')"
 apk_release="$(extract_template '.magisk_android_release_apk')"
 [[ "$apk_release" == *'validate_android_apk_signatures.sh'* ]] || fail "APK signer validation is missing"
 
+play_publish="$(extract_template '.magisk_android_publish_play')"
+[[ "$play_publish" == *'allow_failure: true'* ]] || fail ".magisk_android_publish_play must stay best-effort (allow_failure: true)"
+
 for name in \
   '.magisk_android_release_github' \
   '.magisk_android_publish_modules_repo'; do

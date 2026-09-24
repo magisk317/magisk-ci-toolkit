@@ -8,6 +8,41 @@ set -euo pipefail
 : "${MAGISK_PLAY_VERSION_CODE:?MAGISK_PLAY_VERSION_CODE is required}"
 : "${MAGISK_PLAY_AAB_FILE:?MAGISK_PLAY_AAB_FILE is required}"
 
+release_env_file="${MAGISK_RELEASE_ENV_FILE:-play-release-status.env}"
+metadata_dir=''
+credentials_file=''
+
+# Play publishing is best-effort (the .magisk_android_publish_play template
+# sets allow_failure: true), so a non-zero exit must not vanish without a
+# trace: record a machine-readable "failed" status unless a status file was
+# already written (the review-gate skip and the success path write their own).
+write_release_status_failed() {
+  local rc=$?
+  if [ "$rc" -eq 0 ] || [ -z "$release_env_file" ] || [ -f "$release_env_file" ]; then
+    return 0
+  fi
+  {
+    printf 'MAGISK_RELEASE_TRACK=%q\n' "$MAGISK_PLAY_TRACK"
+    printf 'MAGISK_RELEASE_VERSION_NAME=%q\n' "$MAGISK_PLAY_VERSION_NAME"
+    printf 'MAGISK_RELEASE_VERSION_CODE=%q\n' "$MAGISK_PLAY_VERSION_CODE"
+    printf 'MAGISK_RELEASE_STATUS=%q\n' "failed"
+    printf 'MAGISK_RELEASE_FAIL_REASON=%q\n' "publish_play.sh exited with status $rc; see the job log for the failing command"
+  } > "$release_env_file" 2>/dev/null || true
+  return 0
+}
+
+cleanup() {
+  write_release_status_failed
+  if [ -n "$metadata_dir" ]; then
+    rm -rf "$metadata_dir"
+  fi
+  if [ -n "$credentials_file" ]; then
+    rm -f "$credentials_file"
+  fi
+  return 0
+}
+trap cleanup EXIT
+
 case "$MAGISK_PLAY_TRACK" in
   alpha|beta|internal|production) ;;
   *) echo "ERROR: unsupported Play track: $MAGISK_PLAY_TRACK" >&2; exit 2 ;;
@@ -31,8 +66,6 @@ case "$MAGISK_PLAY_TRACK" in
     ;;
 esac
 
-release_env_file="${MAGISK_RELEASE_ENV_FILE:-play-release-status.env}"
-
 # Review gate: if resolve_play_release.sh flagged the target track's latest
 # release as not live yet (IN_REVIEW / APPROVED_NOT_PUBLISHED lifecycle
 # states), skip the upload instead of piling up submissions and pressuring
@@ -49,13 +82,7 @@ if [[ "${MAGISK_PLAY_SKIP_RELEASE:-0}" == "1" ]]; then
   exit 0
 fi
 
-metadata_dir=''
 credentials_file="$(mktemp)"
-cleanup() {
-  rm -rf "$metadata_dir"
-  rm -f "$credentials_file"
-}
-trap cleanup EXIT
 
 # Play Store release notes are capped at 500 characters. Alpha builds are
 # published on every push to beta, so the changelog must be derived from the

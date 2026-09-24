@@ -255,6 +255,13 @@
     - .magisk_linux_base
     - .magisk_android_release_owner_rules
   stage: release
+  # Play publishing is best-effort ecosystem-wide: a Play-side block (policy
+  # review, permission declaration, track rejection) is environmental, not a
+  # code defect — it must not fail the release pipeline or gate the Telegram
+  # notification. Override with `allow_failure: false` on the job when a hard
+  # failure is genuinely wanted. publish_play.sh keeps a machine-readable
+  # MAGISK_RELEASE_STATUS (published/skipped/failed) in the release env file.
+  allow_failure: true
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab" && $MAGISK_ANDROID_RELEASE_PUBLISH_PLAY == "true"'
     - when: never
