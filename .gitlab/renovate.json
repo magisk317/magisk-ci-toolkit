@@ -1,0 +1,10 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Self-Renovate policy for the shared CI toolkit. Consumers inherit the shared policy from the root default.json (gitlab>magisk3171/magisk-ci-toolkit preset); this file only overrides what differs for this repository.",
+  "extends": [
+    "gitlab>magisk3171/magisk-ci-toolkit"
+  ],
+  "baseBranchPatterns": [
+    "main"
+  ]
+}

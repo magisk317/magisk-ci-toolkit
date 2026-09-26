@@ -2,6 +2,9 @@ workflow:
   auto_cancel:
     on_new_commit: interruptible
   rules:
+    # Scheduled pipelines exist solely to run this repository's own Renovate
+    # (see the renovate:gitlab job and .gitlab/renovate.json below).
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "pipeline"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -15,14 +18,24 @@ default:
   tags:
     - magisk-amd64-linux
 
+include:
+  # Local include (not a project reference) so the GitLab CI manager follows
+  # this snippet when scanning for dependency updates: it keeps the
+  # renovate/renovate image pin in the shared Renovate template up to date.
+  - local: /.gitlab/ci/renovate.yml
+
 stages:
   - test
+  - maintenance
   - control
 
 shell:test:
   image: alpine:3.22
   stage: test
   rules:
+    # Scheduled pipelines only run Renovate; a daily test-suite run is noise.
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
     - if: '$CI_PIPELINE_SOURCE != "pipeline"'
     - when: never
   before_script:
@@ -54,6 +67,25 @@ shell:test:
     - bash gradle/tests/test_run_gradle_with_retry.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_modules_repo_tag.sh
+
+# Self-Renovate: run the shared serial orchestrator against this repository on
+# a schedule. Consumers reuse the same template with their own repository and
+# the pinned v1 toolkit ref; here the loop runs from the default branch.
+renovate:gitlab:
+  extends: .magisk_renovate_gitlab
+  interruptible: false
+  stage: maintenance
+  tags:
+    - magisk-amd64-linux
+  variables:
+    MAGISK_RENOVATE_REPOSITORY: "magisk3171/shared/magisk-ci-toolkit"
+    MAGISK_RENOVATE_PLATFORM_AUTOMERGE: "false"
+    MAGISK_RENOVATE_IGNORE_TESTS: "true"
+    # ci/renovate_serial_loop.sh hard requirement: obsolete MR pipelines must
+    # be cancellable so a single orchestrator survives its own merge.
+    MAGISK_CANCEL_OLDER_MR_PIPELINES: "true"
+    # Consumers pin the moving v1 tag; the toolkit drives its own loop from main.
+    MAGISK_CI_TOOLKIT_REF: "main"
 
 cancel:older:mr:pipelines:
   image: alpine:3.22
