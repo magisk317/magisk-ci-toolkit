@@ -36,3 +36,4 @@ trusted_target_branch() {
 trusted_project_is_allowed() {
   trusted_project_id "$1" >/dev/null
 }
+# E2E probe: auto-merged by renovate:self-automerge on 2026-09-26.
