@@ -75,8 +75,13 @@ renovate:gitlab:
   extends: .magisk_renovate_gitlab
   interruptible: false
   stage: maintenance
+  # The renovate image runs as a non-root uid, so it cannot create the
+  # per-project /opt/gradle-cache directory that the amd64 runner's pre-build
+  # script prepares for Android builds. The arm64 group runner runs the same
+  # pre-build successfully for the same image (see NapGram's renovate:gitlab),
+  # so this job is pinned there.
   tags:
-    - magisk-amd64-linux
+    - magisk-arm64-linux
   variables:
     MAGISK_RENOVATE_REPOSITORY: "magisk3171/shared/magisk-ci-toolkit"
     MAGISK_RENOVATE_PLATFORM_AUTOMERGE: "false"
