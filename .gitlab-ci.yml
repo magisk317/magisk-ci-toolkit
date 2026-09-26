@@ -30,7 +30,7 @@ stages:
   - control
 
 shell:test:
-  image: alpine:3.22
+  image: alpine:3.24
   stage: test
   rules:
     # Scheduled pipelines only run Renovate; a daily test-suite run is noise.
@@ -93,7 +93,7 @@ renovate:gitlab:
     MAGISK_CI_TOOLKIT_REF: "main"
 
 cancel:older:mr:pipelines:
-  image: alpine:3.22
+  image: alpine:3.24
   stage: control
   interruptible: true
   rules:
