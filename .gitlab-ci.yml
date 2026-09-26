@@ -23,6 +23,13 @@ include:
   # this snippet when scanning for dependency updates: it keeps the
   # renovate/renovate image pin in the shared Renovate template up to date.
   - local: /.gitlab/ci/renovate.yml
+  # Local include of the trusted controller template. Consumers
+  # (MiPush, NapGram, ...) reference the same anchor through their own
+  # pipelines and their bridges target this repository; including it here
+  # keeps the downstream controller job (cancel:older:mr:pipelines) in sync
+  # for those bridges. This repository cannot bridge into itself, so its own
+  # merge requests are handled by renovate:self-automerge below.
+  - local: /.gitlab/ci/cancel-mr-pipelines.yml
 
 stages:
   - test
@@ -47,29 +54,34 @@ shell:test:
       ci/cancel_older_mr_pipelines.sh
       ci/cancel_older_renovate_pipelines.sh
       ci/auto_merge_upstream_mr.sh
+      ci/auto_merge_self_renovate_mrs.sh
       ci/renovate_serial_loop.sh
       gradle/run_gradle_with_retry.sh
       ci/tests/test_cancel_older_mr_pipelines.sh
       ci/tests/test_cancel_older_renovate_pipelines.sh
       ci/tests/test_auto_merge_upstream_mr.sh
+      ci/tests/test_auto_merge_self_renovate_mrs.sh
       ci/tests/test_renovate_serial_loop.sh
       ci/tests/test_gitlab_telegram_release.sh
       ci/tests/test_linux_release_template.sh
       gradle/tests/test_run_gradle_with_retry.sh
       release/tests/test_release_notes.sh
       release/tests/test_modules_repo_tag.sh
+      ci/tests/test_trusted_projects.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
     - bash ci/tests/test_cancel_older_renovate_pipelines.sh
     - bash ci/tests/test_auto_merge_upstream_mr.sh
+    - bash ci/tests/test_auto_merge_self_renovate_mrs.sh
     - bash ci/tests/test_renovate_serial_loop.sh
     - bash ci/tests/test_gitlab_telegram_release.sh
     - bash ci/tests/test_linux_release_template.sh
     - bash gradle/tests/test_run_gradle_with_retry.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_modules_repo_tag.sh
+    - bash ci/tests/test_trusted_projects.sh
 
 # Self-Renovate: run the shared serial orchestrator against this repository on
-# a schedule. Consumers reuse the same template with their own repository and
+# a schedule. Consumers reuse the same template with their repository and
 # the pinned v1 toolkit ref; here the loop runs from the default branch.
 renovate:gitlab:
   extends: .magisk_renovate_gitlab
@@ -86,11 +98,42 @@ renovate:gitlab:
     MAGISK_RENOVATE_REPOSITORY: "magisk3171/shared/magisk-ci-toolkit"
     MAGISK_RENOVATE_PLATFORM_AUTOMERGE: "false"
     MAGISK_RENOVATE_IGNORE_TESTS: "true"
-    # ci/renovate_serial_loop.sh hard requirement: obsolete MR pipelines must
-    # be cancellable so a single orchestrator survives its own merge.
+    # ci/renovate_serial_loop.sh hard requirement: obsolete Renovate pipelines
+    # must be cancellable so a single orchestrator survives its own merge.
+    # Consumers get that cancellation from the renovate bridge kind; this
+    # repository performs it in renovate:self-automerge below.
     MAGISK_CANCEL_OLDER_MR_PIPELINES: "true"
     # Consumers pin the moving v1 tag; the toolkit drives its own loop from main.
     MAGISK_CI_TOOLKIT_REF: "main"
+
+# Self-Renovate auto-merge: a multi-project bridge cannot target the project
+# its own pipeline runs in (probe-verified on this instance: a self trigger is
+# rejected as an invalid bridge trigger, the pipeline create API refuses the
+# CI job token, and a child pipeline inherits the unprotected merge request
+# ref, where the masked merge token is unavailable), so this repository has no
+# bridge-side controller for its own merge requests. The serial Renovate
+# pipeline already runs on the protected default branch, where
+# MAGISK_CI_MR_AUTOMERGE_TOKEN is available: this job merges the requests
+# Renovate opens with the same validation and sha pinning as the consumer
+# controller, and performs the latest-wins cancellation consumers receive
+# from the renovate bridge kind. Each merge request still runs its own
+# pipeline, and every merge commit is guarded by shell:test on the resulting
+# push pipeline.
+renovate:self-automerge:
+  image: alpine:3.24
+  stage: maintenance
+  interruptible: false
+  needs: []
+  before_script:
+    - apk add --no-cache bash curl jq
+  script:
+    - bash ci/auto_merge_self_renovate_mrs.sh
+  rules:
+    # Same source contract as the serial loop in renovate:gitlab.
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api"'
+    - when: never
 
 cancel:older:mr:pipelines:
   image: alpine:3.24

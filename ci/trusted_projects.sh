@@ -2,6 +2,11 @@
 # Shared allowlist for every trusted upstream project handled by the CI
 # controller. Keep project IDs and target branches together so the merge and
 # cancellation controllers cannot drift apart.
+#
+# Upstreams are the consumer repositories the controller serves. The toolkit
+# itself is the controller project, never an upstream: it cannot bridge into
+# itself, so its own Renovate merge requests are merged by
+# ci/auto_merge_self_renovate_mrs.sh from its own schedule pipeline.
 
 trusted_project_id() {
   case "$1" in
@@ -21,7 +26,11 @@ trusted_project_id() {
 
 trusted_target_branch() {
   trusted_project_id "$1" >/dev/null || return 1
-  printf '%s\n' "beta"
+  case "$1" in
+    # Every consumer renovates its protected beta branch. The toolkit is the
+    # controller project itself and is never an upstream target.
+    *) printf '%s\n' "beta" ;;
+  esac
 }
 
 trusted_project_is_allowed() {
