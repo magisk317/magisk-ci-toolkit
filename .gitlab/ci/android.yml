@@ -4,7 +4,14 @@
 # and define concrete jobs with `extends`.
 
 .magisk_android_base:
-  image: "eclipse-temurin:26-jdk"
+  # Ubuntu 26.04 (glibc 2.43). The runners mount host-built ARM aidl/aapt2
+  # binaries that require GLIBC_2.38, so the image needs a glibc at least
+  # that new; no published JDK 27 image qualifies (temurin ships no 27 image
+  # at all, Corretto 27 is AL2023 glibc 2.34 or Alpine musl, and Liberica 27
+  # is Debian bookworm glibc 2.36). javac 27 itself comes from an Adoptium GA
+  # tarball staged by the before_script into the persistent SDK mount, so
+  # each runner downloads it only once.
+  image: "ubuntu:26.04"
   resource_group: ${MAGISK_GRADLE_RESOURCE_GROUP:-android-gradle-build}
   variables:
     GET_SOURCES_ATTEMPTS: "3"
@@ -82,6 +89,36 @@
       rm -rf /var/lib/apt/lists/*
 
       mkdir -p "$ANDROID_HOME"
+      # Ubuntu 24.04 has no JDK 27 package and no published 27 image meets the
+      # glibc floor (see the image comment above), so stage an Adoptium GA
+      # tarball into the persistent SDK mount: each runner downloads it once,
+      # guarded by a lock that mirrors the SDK bootstrap below.
+      magisk_jdk_dir="$ANDROID_HOME/jdk-27"
+      if [ ! -x "$magisk_jdk_dir/bin/javac" ]; then
+        exec 9>"$ANDROID_HOME/.jdk.lock" 2>/dev/null || true
+        flock 9 2>/dev/null || true
+        if [ ! -x "$magisk_jdk_dir/bin/javac" ]; then
+          magisk_dpkg_arch="$(dpkg --print-architecture)"
+          case "$magisk_dpkg_arch" in
+            amd64) magisk_jdk_arch=x64 ;;
+            arm64) magisk_jdk_arch=aarch64 ;;
+            *) echo "Unsupported runner architecture: $magisk_dpkg_arch" >&2; exit 1 ;;
+          esac
+          magisk_jdk_tmp="$(mktemp -d)"
+          curl -fsSL --retry 2 \
+            "https://api.adoptium.net/v3/binary/latest/27/ga/linux/${magisk_jdk_arch}/jdk/hotspot/normal/eclipse" \
+            -o "$magisk_jdk_tmp/jdk.tar.gz"
+          rm -rf "$magisk_jdk_dir"
+          mkdir -p "$magisk_jdk_dir"
+          tar -xzf "$magisk_jdk_tmp/jdk.tar.gz" -C "$magisk_jdk_dir" --strip-components=1
+          rm -rf "$magisk_jdk_tmp"
+        fi
+        flock -u 9 2>/dev/null || true
+      fi
+      export JAVA_HOME="$magisk_jdk_dir"
+      export PATH="$JAVA_HOME/bin:$PATH"
+      java -version
+
       android_cli="$ANDROID_HOME/cmdline-tools/latest/bin/android"
       sdkmanager_cli="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
