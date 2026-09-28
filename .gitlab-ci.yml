@@ -30,6 +30,10 @@ include:
   # for those bridges. This repository cannot bridge into itself, so its own
   # merge requests are handled by renovate:self-automerge below.
   - local: /.gitlab/ci/cancel-mr-pipelines.yml
+  # Local include of the utility-job anchor. Consumers reference the same
+  # anchor through their own pipelines (sync:github, bundle refreshers, ...);
+  # this repository's own alpine jobs extend it below.
+  - local: /.gitlab/ci/utility.yml
 
 stages:
   - test
@@ -37,7 +41,7 @@ stages:
   - control
 
 shell:test:
-  image: alpine:3.24
+  extends: .magisk_utility_base
   stage: test
   rules:
     # Scheduled pipelines only run Renovate; a daily test-suite run is noise.
@@ -45,8 +49,11 @@ shell:test:
       when: never
     - if: '$CI_PIPELINE_SOURCE != "pipeline"'
     - when: never
+  # Superset of the anchor's packages (shellcheck/jq/openssl for the lint and
+  # test passes). A job-level before_script replaces the anchor's, so the full
+  # set is spelled out here.
   before_script:
-    - apk add --no-cache bash curl jq shellcheck python3 openssl git
+    - apk add --no-cache bash ca-certificates curl git jq shellcheck python3 openssl
   script:
     - bash -n ci/*.sh ci/tests/*.sh gradle/*.sh gradle/tests/*.sh release/tests/*.sh
     - >-
@@ -120,12 +127,13 @@ renovate:gitlab:
 # pipeline, and every merge commit is guarded by shell:test on the resulting
 # push pipeline.
 renovate:self-automerge:
-  image: alpine:3.24
+  extends: .magisk_utility_base
   stage: maintenance
   interruptible: false
   needs: []
+  # The merge script parses glab JSON, so jq joins the anchor's package set.
   before_script:
-    - apk add --no-cache bash curl jq
+    - apk add --no-cache bash ca-certificates curl git jq
   script:
     - bash ci/auto_merge_self_renovate_mrs.sh
   rules:
@@ -136,14 +144,16 @@ renovate:self-automerge:
     - when: never
 
 cancel:older:mr:pipelines:
-  image: alpine:3.24
+  extends: .magisk_utility_base
   stage: control
   interruptible: true
   rules:
     - if: '$CI_PIPELINE_SOURCE == "pipeline"'
     - when: never
+  # The cancel scripts query the pipelines API through glab+jq, so jq joins the
+  # anchor's package set.
   before_script:
-    - apk add --no-cache bash curl jq
+    - apk add --no-cache bash ca-certificates curl git jq
   script:
     # MR merge is independent of pipeline state. Cancellation is a best-effort
     # cleanup for the same MR/ref and must never veto a successful merge.

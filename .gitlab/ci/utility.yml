@@ -1,0 +1,22 @@
+# Reusable anchor for lightweight, non-Gradle utility jobs (GitHub mirror
+# pushes, bundle refreshers, notification bridges, one-off shell chores).
+#
+# Ecosystem image strategy — every job has exactly one image source:
+#   Android Gradle jobs  -> .magisk_android_base (ubuntu:26.04 + staged JDK 27)
+#   utility jobs         -> this anchor (alpine, pinned)
+#   language-tool jobs   -> their own pinned tool image (golang/bun/node/docker/
+#                           rust), a registered exception, not unified here
+# Alpine is pinned to the same minor the toolkit's own jobs use, and Renovate
+# keeps the pin current like any other dependency. Floating tags
+# (alpine:latest) are banned by convention: upstream can reroll the tag under
+# a repository and break a mirror job that worked in the morning.
+#
+# before_script installs the package set every known utility job needs:
+# bash (the runner's shell), ca-certificates (authenticated HTTPS), curl and
+# git (release downloads, mirror pushes). A job that needs more (jq, python3,
+# file, ...) spells out its own before_script — a job-level before_script
+# REPLACES this one, so list the full set in that case.
+.magisk_utility_base:
+  image: "alpine:3.24"
+  before_script:
+    - apk add --no-cache bash ca-certificates curl git
