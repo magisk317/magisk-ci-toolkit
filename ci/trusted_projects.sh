@@ -20,6 +20,9 @@ trusted_project_id() {
     magisk3171/MiPushZygisk) printf '%s\n' "84115160" ;;
     magisk3171/napgram-ecosystem/NapLink) printf '%s\n' "84834294" ;;
     magisk3171/android-host-tools-arm64) printf '%s\n' "85413835" ;;
+    # Owns the shared Gradle version catalog and Renovates it on its own
+    # schedule so the daily consumer sync has fresh versions to deliver.
+    magisk3171/shared/magisk-build-logic) printf '%s\n' "83955125" ;;
     *) return 1 ;;
   esac
 }
@@ -27,6 +30,9 @@ trusted_project_id() {
 trusted_target_branch() {
   trusted_project_id "$1" >/dev/null || return 1
   case "$1" in
+    # build-logic has no beta branch: it renovates its protected default
+    # branch, which is where the consumer sync reads the catalog from.
+    magisk3171/shared/magisk-build-logic) printf '%s\n' "main" ;;
     # Every consumer renovates its protected beta branch. The toolkit is the
     # controller project itself and is never an upstream target.
     *) printf '%s\n' "beta" ;;
