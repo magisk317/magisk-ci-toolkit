@@ -70,7 +70,10 @@
         ignorePaths: [".github/**"],
         allowedUnsafeExecutions: ["gradleWrapper"],
         // Renovate only discovers and updates the MR. The protected toolkit
-        // controller is the sole merge executor for trusted consumers.
+        // controller is the merge executor for trusted consumers; the serial
+        // loop in ci/renovate_serial_loop.sh merges a backlog directly only
+        // to restore its one-MR-at-a-time invariant when the controller path
+        // leaves requests unmerged.
         automerge: false,
         automergeType: "pr",
         automergeStrategy: "merge",

@@ -25,6 +25,15 @@ case "$MOCK_SCENARIO:$count" in
   already-merged:1)
     printf '%s\n' "done" >"$MOCK_STATE_FILE"
     ;;
+  backlog-after-scan:1)
+    printf '%s\n' "backlog" >"$MOCK_STATE_FILE"
+    ;;
+  backlog-after-scan:2)
+    printf '%s\n' "done" >"$MOCK_STATE_FILE"
+    ;;
+  backlog-before-round:1 | backlog-partial:1)
+    printf '%s\n' "done" >"$MOCK_STATE_FILE"
+    ;;
   *)
     :
     ;;
@@ -56,14 +65,58 @@ printf '%s\n' "$1" >>"$MOCK_SLEEP_LOG"
 MOCK_SLEEP
 chmod +x "$mock_bin/sleep"
 
+# Merge-request body helpers. sha aaa... is the request HEAD, bbb... the merge
+# commit that lands on the target branch.
+mr_opened_json() {
+  jq -nc \
+    --argjson iid "$1" \
+    --arg branch "$2" \
+    --argjson conflicts "$3" \
+    '{iid:$iid,state:"opened",source_project_id:123,source_branch:$branch,
+      target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false}'
+}
+
+mr_merged_json() {
+  jq -nc \
+    --argjson iid "$1" \
+    '{iid:$iid,state:"merged",source_project_id:123,
+      source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",
+      sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
+}
+
 cat >"$mock_bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Merge-request body helpers. sha aaa... is the request HEAD, bbb... the merge
+# commit that lands on the target branch.
+mr_opened_json() {
+  jq -nc \
+    --argjson iid "$1" \
+    --arg branch "$2" \
+    --argjson conflicts "$3" \
+    '{iid:$iid,state:"opened",source_project_id:123,source_branch:$branch,
+      target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false}'
+}
+
+mr_merged_json() {
+  jq -nc \
+    --argjson iid "$1" \
+    '{iid:$iid,state:"merged",source_project_id:123,
+      source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",
+      sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
+}
 
 output_file=""
 method="GET"
 url=""
 requested_state=""
+write_out=""
+merge_sha=""
 while (($# > 0)); do
   case "$1" in
     --output)
@@ -77,10 +130,15 @@ while (($# > 0)); do
     --data-urlencode)
       case "$2" in
         state=*) requested_state="${2#state=}" ;;
+        sha=*) merge_sha="${2#sha=}" ;;
       esac
       shift 2
       ;;
-    --header | --write-out)
+    --header)
+      shift 2
+      ;;
+    --write-out)
+      write_out="$2"
       shift 2
       ;;
     --get | --fail | --silent | --show-error | --location)
@@ -96,6 +154,30 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+if [[ "$method" == "PUT" ]]; then
+  [[ "$url" == */merge ]] || { echo "mock curl: unsupported PUT URL $url" >&2; exit 64; }
+  iid="${url##*/merge_requests/}"
+  iid="${iid%%/*}"
+  if [[ -n "${MOCK_MERGE_HTTP_STATUS:-}" ]]; then
+    jq -n '{message:"merge rejected by mock"}' >"$output_file"
+    printf '%s' "$MOCK_MERGE_HTTP_STATUS"
+    exit 0
+  fi
+  if grep -qx "$iid" "$MOCK_MERGED_FILE" 2>/dev/null; then
+    jq -n '{message:"already merged"}' >"$output_file"
+    printf '405'
+    exit 0
+  fi
+  printf '%s\n' "$iid" >>"$MOCK_MERGED_FILE"
+  if [[ "$(cat "$MOCK_STATE_FILE")" == "backlog" ]] \
+    && grep -qx 101 "$MOCK_MERGED_FILE" && grep -qx 102 "$MOCK_MERGED_FILE"; then
+    printf '%s\n' "merged" >"$MOCK_STATE_FILE"
+  fi
+  mr_merged_json "$iid" >"$output_file"
+  printf '200'
+  exit 0
+fi
 
 [[ "$method" == "GET" && -n "$output_file" ]] || {
   echo "mock curl: expected GET with output file" >&2
@@ -123,31 +205,84 @@ if [[ "$url" == */repository/compare ]]; then
   exit 0
 fi
 
-if [[ "$url" == */merge_requests && "$requested_state" == "opened" && "$state" == "open" ]]; then
-    jq -n '[{iid:101,state:"opened",source_project_id:123,source_branch:"renovate/agp",target_branch:"beta"}]' >"$output_file"
-  exit 0
-fi
-
 if [[ "$url" == */merge_requests && "$requested_state" == "opened" ]]; then
-  jq -n '[]' >"$output_file"
+  if [[ "$state" == "open" ]]; then
+    printf '[%s]' "$(mr_opened_json 101 "renovate/agp" false)" >"$output_file"
+  elif [[ "$state" == "backlog" ]]; then
+    # Backlog set {!101, !102}; entries already merged by the drain drop out.
+    entries=()
+    for iid in 102 101; do
+      grep -qx "$iid" "$MOCK_MERGED_FILE" 2>/dev/null || entries+=("$iid")
+    done
+    {
+      printf '['
+      first=1
+      for iid in ${entries[@]+"${entries[@]}"}; do
+        ((first)) || printf ','
+        first=0
+        conflicts=false
+        [[ "$iid" == "${MOCK_CONFLICT_IID:-}" ]] && conflicts=true
+        mr_opened_json "$iid" "renovate/dep-${iid}" "$conflicts"
+      done
+      printf ']'
+    } >"$output_file"
+  else
+    jq -n '[]' >"$output_file"
+  fi
   exit 0
 fi
 
-if [[ "$url" == */merge_requests && "$requested_state" == "merged" && ("$state" == "done" || "$state" == "merged") ]]; then
-  jq -n '[{iid:101,state:"merged",source_project_id:123,source_branch:"renovate/agp",target_branch:"beta",merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]' >"$output_file"
+if [[ "$url" == */merge_requests && "$requested_state" == "merged" ]]; then
+  if [[ -s "$MOCK_MERGED_FILE" ]]; then
+    {
+      printf '['
+      first=1
+      while IFS= read -r iid; do
+        [[ -n "$iid" ]] || continue
+        ((first)) || printf ','
+        first=0
+        mr_merged_json "$iid"
+      done <"$MOCK_MERGED_FILE"
+      printf ']'
+    } >"$output_file"
+  elif [[ "$state" == "done" || "$state" == "merged" ]]; then
+    jq -n '[{iid:101,state:"merged",source_project_id:123,source_branch:"renovate/agp",target_branch:"beta",merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]' >"$output_file"
+  else
+    jq -n '[]' >"$output_file"
+  fi
+  exit 0
+fi
+
+if [[ "$url" =~ /merge_requests/([0-9]+)$ ]]; then
+  iid="${BASH_REMATCH[1]}"
+  if grep -qx "$iid" "$MOCK_MERGED_FILE" 2>/dev/null; then
+    mr_merged_json "$iid" >"$output_file"
+    exit 0
+  fi
+  if [[ "$state" == "backlog" ]]; then
+    # In a backlog the open/merged state of {!101, !102} is owned by the
+    # drain: opened until the merge PUT lands in the merged log.
+    conflicts=false
+    [[ "$iid" == "${MOCK_CONFLICT_IID:-}" ]] && conflicts=true
+    mr_opened_json "$iid" "renovate/dep-${iid}" "$conflicts" >"$output_file"
+    exit 0
+  fi
+  if [[ "$iid" == "101" ]]; then
+    # Reading !101 while the scan produced it transitions the target branch.
+    if [[ "$state" == "open" ]]; then
+      printf '%s\n' "merged" >"$MOCK_STATE_FILE"
+    fi
+    mr_merged_json "$iid" >"$output_file"
+    exit 0
+  fi
+  conflicts=false
+  [[ "$iid" == "${MOCK_CONFLICT_IID:-}" ]] && conflicts=true
+  mr_opened_json "$iid" "renovate/dep-${iid}" "$conflicts" >"$output_file"
   exit 0
 fi
 
 if [[ "$url" == */merge_requests ]]; then
   jq -n '[]' >"$output_file"
-  exit 0
-fi
-
-if [[ "$url" == */merge_requests/101 ]]; then
-  if [[ "$state" == "open" ]]; then
-    printf '%s\n' "merged" >"$MOCK_STATE_FILE"
-  fi
-  jq -n '{iid:101,state:"merged",source_project_id:123,source_branch:"renovate/agp",target_branch:"beta",merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' >"$output_file"
   exit 0
 fi
 
@@ -162,6 +297,7 @@ run_case() {
   mkdir -p "$case_dir/project"
   printf '%s\n' "${2:-none}" >"$case_dir/state"
   printf '0\n' >"$case_dir/renovate-count"
+  : >"$case_dir/merged.log"
   : >"$case_dir/sleep.log"
 
   set +e
@@ -170,7 +306,10 @@ run_case() {
     MOCK_SCENARIO="$scenario" \
     MOCK_STATE_FILE="$case_dir/state" \
     MOCK_RENOVATE_COUNT_FILE="$case_dir/renovate-count" \
+    MOCK_MERGED_FILE="$case_dir/merged.log" \
     MOCK_SLEEP_LOG="$case_dir/sleep.log" \
+    MOCK_CONFLICT_IID="${MOCK_CONFLICT_IID:-}" \
+    MOCK_MERGE_HTTP_STATUS="${MOCK_MERGE_HTTP_STATUS:-}" \
     CI_API_V4_URL="https://gitlab.example/api/v4" \
     CI_PROJECT_ID="123" \
     CI_PROJECT_DIR="$case_dir/project" \
@@ -183,6 +322,9 @@ run_case() {
     MAGISK_RENOVATE_MR_MAX_POLLS="4" \
     MAGISK_RENOVATE_NO_MR_GRACE_POLLS="2" \
     MAGISK_RENOVATE_MAX_ROUNDS="2" \
+    MAGISK_RENOVATE_MERGE_ATTEMPTS="${MAGISK_RENOVATE_MERGE_ATTEMPTS:-2}" \
+    MAGISK_RENOVATE_MERGE_DELAY_SECONDS="${MAGISK_RENOVATE_MERGE_DELAY_SECONDS:-0}" \
+    MAGISK_RENOVATE_BACKLOG_MERGE="${MAGISK_RENOVATE_BACKLOG_MERGE:-true}" \
     bash "$loop_script" >"$case_dir/output.log" 2>&1
   run_status=$?
   set -e
@@ -208,5 +350,61 @@ grep -F "Detected already-merged Renovate merge request !101" "$tmp_root/already
 
 run_case existing open
 [[ "$(cat "$tmp_root/existing/renovate-count")" == "1" ]] || exit 1
+
+# Backlog before the round: the loop merges the extra Renovate requests itself
+# (oldest first) and continues with the round instead of failing.
+run_case backlog-before-round backlog
+[[ "$(cat "$tmp_root/backlog-before-round/status")" == "0" ]] || {
+  cat "$tmp_root/backlog-before-round/output.log" >&2
+  exit 1
+}
+grep -F "Renovate backlog detected: 2 open Renovate merge requests (!102, !101) targeting beta; merging them directly before continuing." "$tmp_root/backlog-before-round/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-before-round/output.log" >/dev/null
+grep -F "Merged Renovate merge request !102 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-before-round/output.log" >/dev/null
+grep -F "Starting Renovate serial round 1/2" "$tmp_root/backlog-before-round/output.log" >/dev/null
+[[ "$(cat "$tmp_root/backlog-before-round/renovate-count")" == "2" ]] || exit 1
+grep -Fx "101" "$tmp_root/backlog-before-round/merged.log" >/dev/null
+grep -Fx "102" "$tmp_root/backlog-before-round/merged.log" >/dev/null
+
+# Backlog after the scan: Renovate itself produced two open requests; the drain
+# runs inside wait_for_scan_result and the round completes normally.
+run_case backlog-after-scan none
+[[ "$(cat "$tmp_root/backlog-after-scan/status")" == "0" ]] || {
+  cat "$tmp_root/backlog-after-scan/output.log" >&2
+  exit 1
+}
+grep -F "Renovate backlog detected: 2 open Renovate merge requests (!102, !101)" "$tmp_root/backlog-after-scan/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-after-scan/output.log" >/dev/null
+grep -F "Merged Renovate merge request !102 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-after-scan/output.log" >/dev/null
+grep -F "Detected already-merged Renovate merge request !101" "$tmp_root/backlog-after-scan/output.log" >/dev/null
+
+# A rejected merge (no merge permission) fails loudly with an actionable
+# message instead of silently leaving the backlog in place.
+MOCK_MERGE_HTTP_STATUS=403 run_case backlog-merge-rejected backlog
+[[ "$(cat "$tmp_root/backlog-merge-rejected/status")" == "1" ]] || {
+  cat "$tmp_root/backlog-merge-rejected/output.log" >&2
+  exit 1
+}
+grep -F "RENOVATE_TOKEN cannot merge !101 (HTTP 403: merge rejected by mock)" "$tmp_root/backlog-merge-rejected/output.log" >/dev/null
+
+# The strict behaviour is restorable per repository.
+MAGISK_RENOVATE_BACKLOG_MERGE=false run_case backlog-merge-disabled backlog
+[[ "$(cat "$tmp_root/backlog-merge-disabled/status")" == "1" ]] || {
+  cat "$tmp_root/backlog-merge-disabled/output.log" >&2
+  exit 1
+}
+grep -F "more than one open Renovate merge request exists before round 1" "$tmp_root/backlog-merge-disabled/output.log" >/dev/null
+
+# A conflicting request cannot be drained; it stays open and the loop falls
+# back to the single-request wait, which eventually fails with a clear reason.
+MOCK_CONFLICT_IID=102 run_case backlog-partial backlog
+[[ "$(cat "$tmp_root/backlog-partial/status")" == "1" ]] || {
+  cat "$tmp_root/backlog-partial/output.log" >&2
+  exit 1
+}
+grep -F "Renovate merge request !102 has conflicts; backlog merge is skipped." "$tmp_root/backlog-partial/output.log" >/dev/null
+grep -F "Continuing with existing Renovate merge request !102." "$tmp_root/backlog-partial/output.log" >/dev/null
+grep -F "Renovate merge request !102 was not merged into beta after 4 polls" "$tmp_root/backlog-partial/output.log" >/dev/null
+grep -Fx "101" "$tmp_root/backlog-partial/merged.log" >/dev/null
 
 echo "serial Renovate loop tests passed"

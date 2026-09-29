@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
+# Serial Renovate orchestrator.
+#
+# The loop keeps exactly one Renovate merge request in flight per round: it
+# runs Renovate, waits for the toolkit controller to merge the request through
+# the merge-request pipeline bridge, then starts the next round.
+#
+# A backlog (more than one open Renovate merge request) means the controller
+# merge path left requests unmerged - for instance a broken consumer pipeline
+# prevents the merge-request pipeline from bridging into the controller. When
+# a backlog is detected the loop drains it itself: the open list is already
+# restricted to renovate/ branches of this project targeting the default
+# branch, so every entry is verified to be a Renovate request, and each one is
+# merged directly with RENOVATE_TOKEN (the same token that creates them).
+# Draining restores the one-request-at-a-time invariant, so the schedule
+# pipeline self-heals instead of failing with "more than one open Renovate
+# merge request exists". Set MAGISK_RENOVATE_BACKLOG_MERGE=false to restore
+# the strict fail behaviour.
 set -euo pipefail
 
 readonly HARD_MAX_ROUNDS=50
 readonly DEFAULT_POLL_INTERVAL_SECONDS=5
 readonly DEFAULT_MAX_POLLS=120
 readonly DEFAULT_NO_MR_GRACE_POLLS=3
+readonly DEFAULT_MERGE_ATTEMPTS=6
+readonly DEFAULT_MERGE_DELAY_SECONDS=2
 
 fail() {
   echo "Error: $*" >&2
@@ -46,6 +65,17 @@ require_unsigned_integer "MAGISK_RENOVATE_MAX_ROUNDS" "$max_rounds"
   fail "MAGISK_RENOVATE_NO_MR_GRACE_POLLS must be between 1 and MAGISK_RENOVATE_MR_MAX_POLLS"
 ((max_rounds > 0 && max_rounds <= HARD_MAX_ROUNDS)) || \
   fail "MAGISK_RENOVATE_MAX_ROUNDS must be between 1 and ${HARD_MAX_ROUNDS}"
+
+backlog_merge="${MAGISK_RENOVATE_BACKLOG_MERGE:-true}"
+case "$backlog_merge" in
+  true | false) ;;
+  *) fail "MAGISK_RENOVATE_BACKLOG_MERGE must be true or false" ;;
+esac
+merge_attempts="${MAGISK_RENOVATE_MERGE_ATTEMPTS:-$DEFAULT_MERGE_ATTEMPTS}"
+merge_delay="${MAGISK_RENOVATE_MERGE_DELAY_SECONDS:-$DEFAULT_MERGE_DELAY_SECONDS}"
+require_unsigned_integer "MAGISK_RENOVATE_MERGE_ATTEMPTS" "$merge_attempts"
+require_unsigned_integer "MAGISK_RENOVATE_MERGE_DELAY_SECONDS" "$merge_delay"
+((merge_attempts > 0)) || fail "MAGISK_RENOVATE_MERGE_ATTEMPTS must be greater than zero"
 
 api_base="${CI_API_V4_URL%/}/projects/${CI_PROJECT_ID}"
 auth_header=(--header "PRIVATE-TOKEN: ${RENOVATE_TOKEN}")
@@ -125,6 +155,167 @@ get_merge_request() {
       and ((.source_branch // "") | startswith("renovate/"))
       and .source_project_id == $project_id
     ' "$output_file" >/dev/null || fail "merge request !${iid} response is invalid"
+}
+
+# merge_api_curl: the merge endpoint answers 4xx/5xx with a JSON body rather
+# than a curl-level failure, so --fail is dropped and the HTTP status is read
+# from --write-out, mirroring ci/auto_merge_upstream_mr.sh.
+merge_api_curl() {
+  curl --silent --show-error --location "${auth_header[@]}" "$@"
+}
+
+# merge_renovate_mr <iid>: merge one open Renovate merge request at its HEAD
+# sha with the controller semantics: draft, conflicting and pipeline-gated
+# requests are skipped, transient readiness is retried with a backoff ladder,
+# and a request that is already merged or closed counts as done.
+merge_renovate_mr() {
+  local iid="$1"
+  local attempt
+  local response_file
+  local http_status
+  local state
+  local mr_sha
+  local message
+  local retry_delay
+  local backoff
+
+  for ((attempt = 1; attempt <= merge_attempts; attempt++)); do
+    response_file="$tmp_dir/merge-mr-${iid}-${attempt}.json"
+    get_merge_request "$iid" "$response_file"
+
+    state="$(jq -r '.state' "$response_file")"
+    case "$state" in
+      merged)
+        echo "Renovate merge request !${iid} is already merged."
+        return 0
+        ;;
+      closed)
+        echo "Renovate merge request !${iid} was closed without merging; skipping."
+        return 0
+        ;;
+      opened) ;;
+      *)
+        fail "Renovate merge request !${iid} has unsupported state ${state}"
+        ;;
+    esac
+
+    if [[ "$(jq -r '.draft' "$response_file")" == "true" ]]; then
+      echo "Renovate merge request !${iid} is a draft; backlog merge is skipped."
+      return 0
+    fi
+    if [[ "$(jq -r '.has_conflicts // false' "$response_file")" == "true" ]]; then
+      echo "Renovate merge request !${iid} has conflicts; backlog merge is skipped."
+      return 0
+    fi
+    if [[ "$(jq -r '.merge_when_pipeline_succeeds // false' "$response_file")" == "true" ]]; then
+      echo "Renovate merge request !${iid} has a pipeline-gated auto-merge armed; it will merge itself."
+      return 0
+    fi
+
+    mr_sha="$(jq -r '.sha | ascii_downcase' "$response_file")"
+    require_sha "merge request !${iid} HEAD sha" "$mr_sha"
+
+    http_status="$(merge_api_curl \
+      --request PUT \
+      --data-urlencode "sha=${mr_sha}" \
+      --output "$response_file" \
+      --write-out '%{http_code}' \
+      "${api_base}/merge_requests/${iid}/merge")" || fail "merge API request failed for !${iid}"
+
+    case "$http_status" in
+      200)
+        jq -e --argjson iid "$iid" '.iid == $iid and .state == "merged"' "$response_file" >/dev/null || \
+          fail "merge API returned an unexpected success response for !${iid}"
+        echo "Merged Renovate merge request !${iid} at ${mr_sha}."
+        return 0
+        ;;
+      401 | 403)
+        message="$(jq -r '.message // .error // "token rejected"' "$response_file" 2>/dev/null || printf '%s' 'token rejected')"
+        fail "RENOVATE_TOKEN cannot merge !${iid} (HTTP ${http_status}: ${message})"
+        ;;
+      409)
+        echo "Merge request !${iid} HEAD changed while merging."
+        ;;
+      405 | 422 | 429 | 5??)
+        message="$(jq -r '.message // .merge_error // "merge is not ready"' "$response_file" 2>/dev/null || printf '%s' 'merge is not ready')"
+        echo "Merge attempt ${attempt}/${merge_attempts} for !${iid} returned HTTP ${http_status}: ${message}"
+        ;;
+      *)
+        message="$(jq -r '.message // .error // "unexpected response"' "$response_file" 2>/dev/null || printf '%s' 'unexpected response')"
+        fail "merge API returned HTTP ${http_status} for !${iid}: ${message}"
+        ;;
+    esac
+
+    if ((attempt < merge_attempts)); then
+      retry_delay="$merge_delay"
+      for ((backoff = 1; backoff < attempt; backoff++)); do
+        retry_delay=$((retry_delay * 2))
+      done
+      if ((retry_delay > 0)); then
+        sleep "$retry_delay"
+      fi
+    fi
+  done
+
+  echo "Warning: merge request !${iid} did not become mergeable after ${merge_attempts} attempts; it stays in the backlog." >&2
+  return 0
+}
+
+# drain_renovate_backlog <open-mrs-file>: merge every open Renovate merge
+# request, oldest first (the API list is sorted newest-updated first). Every
+# entry was pre-filtered to a renovate/ branch of this project targeting the
+# default branch, so a backlog at this point is always Renovate's.
+drain_renovate_backlog() {
+  local open_file="$1"
+  local count
+  local iids
+  local iid
+
+  count="$(jq 'length' "$open_file")"
+  iids="$(jq -r '[.[].iid | tostring] | join(", !")' "$open_file")"
+  echo "Renovate backlog detected: ${count} open Renovate merge requests (!${iids}) targeting ${CI_COMMIT_REF_NAME}; merging them directly before continuing."
+  while IFS= read -r iid; do
+    [[ -n "$iid" ]] || continue
+    require_unsigned_integer "open merge request IID" "$iid"
+    merge_renovate_mr "$iid"
+  done < <(jq -r 'reverse | .[].iid' "$open_file")
+}
+
+# enforce_single_open_mr <context>: ensure at most one open Renovate merge
+# request remains, draining a detected backlog first. On return the refreshed
+# count is in SINGLE_OPEN_COUNT and the sole request IID, when present, in
+# SINGLE_OPEN_IID; fails when a backlog cannot be cleared.
+SINGLE_OPEN_COUNT=0
+SINGLE_OPEN_IID=""
+enforce_single_open_mr() {
+  local context="$1"
+  local open_file="$tmp_dir/open-check.json"
+
+  SINGLE_OPEN_COUNT=0
+  SINGLE_OPEN_IID=""
+  list_renovate_mrs opened "$open_file"
+  SINGLE_OPEN_COUNT="$(jq 'length' "$open_file")"
+  if ((SINGLE_OPEN_COUNT <= 1)); then
+    if ((SINGLE_OPEN_COUNT == 1)); then
+      SINGLE_OPEN_IID="$(jq -r '.[0].iid' "$open_file")"
+      require_unsigned_integer "open merge request IID" "$SINGLE_OPEN_IID"
+    fi
+    return 0
+  fi
+
+  if [[ "$backlog_merge" != "true" ]]; then
+    fail "more than one open Renovate merge request exists ${context}"
+  fi
+
+  drain_renovate_backlog "$open_file"
+  list_renovate_mrs opened "$open_file"
+  SINGLE_OPEN_COUNT="$(jq 'length' "$open_file")"
+  ((SINGLE_OPEN_COUNT <= 1)) || \
+    fail "Renovate merge request backlog could not be cleared ${context}; !$(jq -r '[.[].iid | tostring] | join(", !")' "$open_file") remain open"
+  if ((SINGLE_OPEN_COUNT == 1)); then
+    SINGLE_OPEN_IID="$(jq -r '.[0].iid' "$open_file")"
+    require_unsigned_integer "open merge request IID" "$SINGLE_OPEN_IID"
+  fi
 }
 
 branch_contains_commit() {
@@ -222,13 +413,10 @@ wait_for_scan_result() {
   local current_sha
 
   for ((poll = 1; poll <= max_polls; poll++)); do
-    open_file="$tmp_dir/open-after-scan-${poll}.json"
-    list_renovate_mrs opened "$open_file"
-    open_count="$(jq 'length' "$open_file")"
-    ((open_count <= 1)) || fail "more than one open Renovate merge request exists"
+    enforce_single_open_mr "after the Renovate scan"
+    open_count="$SINGLE_OPEN_COUNT"
     if ((open_count == 1)); then
-      iid="$(jq -r '.[0].iid' "$open_file")"
-      wait_for_merge "$iid" "$pre_round_sha"
+      wait_for_merge "$SINGLE_OPEN_IID" "$pre_round_sha"
       return 0
     fi
 
@@ -263,16 +451,13 @@ command -v renovate >/dev/null 2>&1 || fail "renovate command is required"
 for ((round = 1; round <= max_rounds; round++)); do
   refresh_target_checkout
   pre_round_sha="$(get_target_branch_sha)"
-  open_file="$tmp_dir/open-before-${round}.json"
-  list_renovate_mrs opened "$open_file"
-  open_count="$(jq 'length' "$open_file")"
-  ((open_count <= 1)) || fail "more than one open Renovate merge request exists before round ${round}"
+  enforce_single_open_mr "before round ${round}"
+  open_count="$SINGLE_OPEN_COUNT"
 
   echo "Starting Renovate serial round ${round}/${max_rounds} from ${pre_round_sha}."
   if ((open_count == 1)); then
-    iid="$(jq -r '.[0].iid' "$open_file")"
-    echo "Continuing with existing Renovate merge request !${iid}."
-    wait_for_merge "$iid" "$pre_round_sha"
+    echo "Continuing with existing Renovate merge request !${SINGLE_OPEN_IID}."
+    wait_for_merge "$SINGLE_OPEN_IID" "$pre_round_sha"
   else
     run_renovate_round "$round"
     result_status=0
