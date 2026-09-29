@@ -2,15 +2,30 @@
 # protected controller handles MR/push cleanup and Renovate pipeline
 # coordination. Renovate schedule/web/API pipelines use latest-wins so only
 # one serial Renovate orchestrator remains active for a branch.
+#
+# Cross-family cancellation: MR pipelines additionally pass their source
+# branch so the controller can cancel the sibling push pipeline of the same
+# branch. Renovate pushes a branch before opening the MR, so the workflow rule
+# that suppresses push pipelines on MRs loses the race and both pipelines
+# exist for the same commit; on a single-contested runner that duplicate
+# build starves the MR feedback job. The MR pipeline is the review gate, so
+# the cancellation direction is MR -> push only, never the reverse.
 
 .magisk_cancel_older_mr_pipelines:
   stage: .pre
   interruptible: true
   allow_failure: true
+  # The bridge only creates the downstream pipeline and waits for it
+  # (strategy: depend). Keeping it on the amd64 runner prevents that wait from
+  # occupying a slot on the contended arm64 runner, where the gradle jobs of
+  # the very pipelines this controller cancels are queued.
+  tags:
+    - magisk-amd64-linux
   rules:
     - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
       variables:
         MAGISK_UPSTREAM_REF: "$CI_MERGE_REQUEST_REF_PATH"
+        MAGISK_UPSTREAM_SOURCE_BRANCH: "$CI_MERGE_REQUEST_SOURCE_BRANCH"
         MAGISK_TRIGGER_PIPELINE_KIND: "mr_or_push"
     - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "push"'
       variables:

@@ -86,6 +86,38 @@ expected_upstream_project_id="$(trusted_project_id "$upstream_project_path")" ||
   fail "upstream project is not in the controller allowlist"
 [[ "$upstream_project_id" == "$expected_upstream_project_id" ]] || fail "upstream project ID mismatch"
 
+# Cross-family cancellation: an MR pipeline may also cancel push pipelines of
+# its own source branch. This covers the Renovate race (branch pushed before
+# the MR exists, so the workflow suppression rule cannot suppress the push
+# pipeline) and any human push-then-MR flow. The direction is strictly
+# MR -> push: MR pipelines carry the review feedback humans wait for, while a
+# branch push pipeline duplicates work the MR pipeline already performs.
+# Protected source branches (e.g. a release branch feeding an MR) are exempt so
+# a release build is never interrupted; if protection cannot be determined the
+# feature stays disabled (fail-safe toward not canceling).
+upstream_source_branch="${MAGISK_UPSTREAM_SOURCE_BRANCH:-}"
+cross_family_ref=""
+if [[ "$MAGISK_UPSTREAM_PIPELINE_SOURCE" == "merge_request_event" && -n "$upstream_source_branch" ]]; then
+  if [[ ! "$upstream_source_branch" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$upstream_source_branch" == "$CI_DEFAULT_BRANCH" ]]; then
+    echo "Upstream source branch '${upstream_source_branch}' is not eligible for cross-family cancellation."
+  else
+    protected_branches_file="$tmp_dir/protected-branches.json"
+    if api_curl \
+      --output "$protected_branches_file" \
+      "${CI_API_V4_URL}/projects/${upstream_project_id}/protected_branches?per_page=100" \
+      && jq -e 'type == "array" and all(.[]; (.name | type) == "string")' "$protected_branches_file" >/dev/null; then
+      if jq -e --arg branch "$upstream_source_branch" 'any(.[]; .name == $branch)' "$protected_branches_file" >/dev/null; then
+        echo "Upstream source branch ${upstream_source_branch} is protected; cross-family cancellation is disabled."
+      else
+        cross_family_ref="$upstream_source_branch"
+        echo "Cross-family cancellation enabled for source branch ${cross_family_ref}."
+      fi
+    else
+      echo "Warning: unable to read protected branches for ${upstream_project_path}; cross-family cancellation is disabled." >&2
+    fi
+  fi
+fi
+
 api_base="${CI_API_V4_URL}/projects/${upstream_project_id}/pipelines"
 
 upstream_pipeline_file="$tmp_dir/upstream-pipeline.json"
@@ -105,6 +137,7 @@ jq -e \
     and (.source == "merge_request_event" or .source == "push")
     and .ref == $expected_ref
     and (.created_at | type) == "string"
+    and (.sha | type) == "string"
   ' "$upstream_pipeline_file" >/dev/null || fail "upstream pipeline response is invalid"
 list_merge_request_pipelines() {
   local output_file="$1"
@@ -149,6 +182,7 @@ find_cancel_candidates() {
   local current_created_at
 
   current_created_at="$(jq -r '.created_at' "$upstream_pipeline_file")"
+  current_sha="$(jq -r '.sha // ""' "$upstream_pipeline_file")"
   latest_id="$(
     jq -r \
       --argjson current_id "$upstream_pipeline_id" \
@@ -167,15 +201,25 @@ find_cancel_candidates() {
     --argjson current "$upstream_pipeline_id" \
     --arg current_created_at "$current_created_at" \
     --arg current_ref "$upstream_ref" \
+    --arg current_sha "$current_sha" \
+    --arg family_ref "$cross_family_ref" \
     --argjson active "$ACTIVE_PIPELINE_STATUSES" '
       .[]
-      | select((.source == "merge_request_event" or .source == "push") and .ref == $current_ref)
+      | select(.source == "merge_request_event" or .source == "push")
+      | select(
+          .ref == $current_ref
+          or ($family_ref != "" and .ref == $family_ref and .source == "push")
+        )
       | select(.id != $current)
       | .status as $status
       | select(($active | index($status)) != null)
       | select(
           (.created_at < $current_created_at)
           or (.created_at == $current_created_at and .id < $current)
+          # Same-SHA siblings are the same commit built twice (the push/MR
+          # creation order is not deterministic), so the age filter alone
+          # would miss the sibling created milliseconds later.
+          or ($current_sha != "" and .sha == $current_sha)
         )
       | .id
     ' "$pipelines_file" >"$output_file"
@@ -184,6 +228,11 @@ find_cancel_candidates() {
 }
 
 echo "Validated upstream ${upstream_project_path} pipeline ${upstream_pipeline_id} (${upstream_ref})."
+if [[ -n "$cross_family_ref" ]]; then
+  echo "Cross-family cancellation active for source branch ${cross_family_ref}."
+else
+  echo "Cross-family cancellation inactive; canceling same-ref pipelines only."
+fi
 
 for ((pass = 1; pass <= reconcile_passes; pass++)); do
   pipelines_file="$tmp_dir/pipelines-${pass}.json"

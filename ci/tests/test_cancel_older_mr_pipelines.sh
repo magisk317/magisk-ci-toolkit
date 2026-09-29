@@ -111,6 +111,11 @@ if [[ "$method" == "POST" && "$url" =~ /projects/[0-9]+/pipelines/([0-9]+)/cance
   exit 0
 fi
 
+if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/protected_branches ]]; then
+  jq . "${MOCK_PROTECTED_BRANCHES_FILE:?MOCK_PROTECTED_BRANCHES_FILE is required}" >"$output_file"
+  exit 0
+fi
+
 echo "mock curl: unsupported request ${method} ${url}" >&2
 exit 64
 MOCK_CURL
@@ -124,6 +129,7 @@ start_case() {
   case_dir="$tmp_root/$name"
   mkdir -p "$case_dir"
   printf '[]\n' >"$case_dir/state.json"
+  printf '[]\n' >"$case_dir/protected-branches.json"
   : >"$case_dir/pages.log"
   : >"$case_dir/cancel-attempts.log"
 }
@@ -135,6 +141,7 @@ write_graphql() {
   local upstream_ref="$4"
   local upstream_project_id="$5"
   local upstream_project_path="$6"
+  local upstream_source_branch="${7:-}"
 
   cat >"$case_dir/upstream.env" <<EOF
 MAGISK_UPSTREAM_PROJECT_ID=$upstream_project_id
@@ -144,6 +151,9 @@ MAGISK_UPSTREAM_PIPELINE_IID=$upstream_iid
 MAGISK_UPSTREAM_PIPELINE_SOURCE=$upstream_source
 MAGISK_UPSTREAM_REF=$upstream_ref
 EOF
+  if [[ -n "$upstream_source_branch" ]]; then
+    printf 'MAGISK_UPSTREAM_SOURCE_BRANCH=%s\n' "$upstream_source_branch" >>"$case_dir/upstream.env"
+  fi
 
   jq -n \
     --arg upstream_id "gid://gitlab/Ci::Pipeline/${upstream_id}" \
@@ -181,6 +191,10 @@ EOF
     ' >"$case_dir/graphql.json"
 }
 
+write_protected_branches() {
+  printf '%s\n' "$1" | jq . >"$case_dir/protected-branches.json"
+}
+
 write_pipelines() {
   printf '%s\n' "$1" | jq . >"$case_dir/pipelines.json"
 }
@@ -195,6 +209,7 @@ run_controller() {
     MOCK_GRAPHQL_FILE="$case_dir/graphql.json" \
     MOCK_PIPELINES_FILE="$case_dir/pipelines.json" \
     MOCK_STATE_FILE="$case_dir/state.json" \
+    MOCK_PROTECTED_BRANCHES_FILE="$case_dir/protected-branches.json" \
     MOCK_PAGE_LOG="$case_dir/pages.log" \
     MOCK_CANCEL_ATTEMPT_LOG="$case_dir/cancel-attempts.log" \
     MOCK_FAIL_CANCEL_IDS="$fail_ids" \
@@ -216,6 +231,7 @@ run_controller() {
     MAGISK_UPSTREAM_PIPELINE_IID="$MAGISK_UPSTREAM_PIPELINE_IID" \
     MAGISK_UPSTREAM_PIPELINE_SOURCE="$MAGISK_UPSTREAM_PIPELINE_SOURCE" \
     MAGISK_UPSTREAM_REF="$MAGISK_UPSTREAM_REF" \
+    MAGISK_UPSTREAM_SOURCE_BRANCH="${MAGISK_UPSTREAM_SOURCE_BRANCH:-}" \
     MAGISK_CI_PIPELINE_PAGE_SIZE="2" \
     MAGISK_CI_PIPELINE_MAX_PAGES="20" \
     MAGISK_CI_PIPELINE_RECONCILE_PASSES="2" \
@@ -253,7 +269,7 @@ assert_state() {
 start_case "pagination-and-filtering"
 write_graphql 200 20 merge_request_event refs/merge-requests/20/head 83955143 magisk3171/MiPushFramework
 write_pipelines '[
-  {"id":200,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"running"},
+  {"id":200,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"running","sha":"sha200"},
   {"id":199,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"pending"},
   {"id":198,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"success"},
   {"id":197,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"manual"},
@@ -271,7 +287,7 @@ page_requests="$(wc -l <"$case_dir/pages.log")"
 start_case "push-cancels-older-mr"
 write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
 write_pipelines '[
-  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z"},
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
   {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"},
   {"id":598,"source":"merge_request_event","ref":"refs/merge-requests/58/head","status":"running","created_at":"2026-01-01T00:00:58Z"}
 ]'
@@ -283,7 +299,7 @@ grep -F "Canceling older MR/push pipeline 599" "$case_dir/output.log" >/dev/null
 start_case "no-active-pipelines"
 write_graphql 300 30 merge_request_event refs/merge-requests/30/head 83955172 magisk3171/XposedSmsCode
 write_pipelines '[
-  {"id":300,"source":"merge_request_event","ref":"refs/merge-requests/30/head","status":"success"},
+  {"id":300,"source":"merge_request_event","ref":"refs/merge-requests/30/head","status":"success","sha":"sha300"},
   {"id":299,"source":"merge_request_event","ref":"refs/merge-requests/29/head","status":"failed"}
 ]'
 run_controller
@@ -300,7 +316,7 @@ grep -F "upstream project is not in the controller allowlist" "$case_dir/output.
 start_case "push-upstream-is-accepted"
 write_graphql 360 36 push main 83955143 magisk3171/MiPushFramework
 write_pipelines '[
-  {"id":360,"source":"push","ref":"main","status":"running"}
+  {"id":360,"source":"push","ref":"main","status":"running","sha":"sha360"}
 ]'
 run_controller
 assert_success
@@ -317,7 +333,7 @@ start_case "out-of-order-controller"
 write_graphql 400 40 merge_request_event refs/merge-requests/40/head 85198813 magisk3171/SerialBridge
 write_pipelines '[
   {"id":410,"source":"merge_request_event","ref":"refs/merge-requests/41/head","status":"running"},
-  {"id":400,"source":"merge_request_event","ref":"refs/merge-requests/40/head","status":"running"},
+  {"id":400,"source":"merge_request_event","ref":"refs/merge-requests/40/head","status":"running","sha":"sha400"},
   {"id":390,"source":"merge_request_event","ref":"refs/merge-requests/39/head","status":"waiting_for_resource"}
 ]'
 run_controller
@@ -328,12 +344,70 @@ grep -F "no older active MR/push pipelines remain" "$case_dir/output.log" >/dev/
 start_case "persistent-cancel-failure"
 write_graphql 500 50 merge_request_event refs/merge-requests/50/head 83955143 magisk3171/MiPushFramework
 write_pipelines '[
-  {"id":500,"source":"merge_request_event","ref":"refs/merge-requests/50/head","status":"running"},
+  {"id":500,"source":"merge_request_event","ref":"refs/merge-requests/50/head","status":"running","sha":"sha500"},
   {"id":490,"source":"merge_request_event","ref":"refs/merge-requests/50/head","status":"running"}
 ]'
 run_controller "490"
 assert_failure
 assert_state '[]'
 grep -F "older active MR/push pipelines remain after reconciliation: 490" "$case_dir/output.log" >/dev/null
+
+start_case "mr-cancels-sibling-push-pipeline"
+write_graphql 700 70 merge_request_event refs/merge-requests/70/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":700,"source":"merge_request_event","ref":"refs/merge-requests/70/head","status":"running","sha":"sha700"},
+  {"id":699,"source":"push","ref":"renovate/kover","status":"running","sha":"sha700"},
+  {"id":698,"source":"push","ref":"beta","status":"running","sha":"sha700"}
+]'
+run_controller
+assert_success
+assert_state '[699]'
+grep -F "Cross-family cancellation enabled for source branch renovate/kover" "$case_dir/output.log" >/dev/null
+grep -F "Canceling older MR/push pipeline 699" "$case_dir/output.log" >/dev/null
+
+start_case "mr-keeps-newer-push-pipeline"
+write_graphql 710 71 merge_request_event refs/merge-requests/71/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":710,"source":"merge_request_event","ref":"refs/merge-requests/71/head","status":"running","sha":"sha710","created_at":"2026-01-01T00:00:10Z"},
+  {"id":711,"source":"push","ref":"renovate/kover","status":"running","sha":"sha711","created_at":"2026-01-01T00:00:20Z"}
+]'
+run_controller
+assert_success
+assert_state '[]'
+grep -F "no older active MR/push pipelines remain" "$case_dir/output.log" >/dev/null
+
+start_case "mr-cancels-same-sha-push-created-later"
+write_graphql 720 72 merge_request_event refs/merge-requests/72/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":720,"source":"merge_request_event","ref":"refs/merge-requests/72/head","status":"running","sha":"sha720","created_at":"2026-01-01T00:00:10Z"},
+  {"id":721,"source":"push","ref":"renovate/kover","status":"running","sha":"sha720","created_at":"2026-01-01T00:00:20Z"}
+]'
+run_controller
+assert_success
+assert_state '[721]'
+grep -F "Canceling older MR/push pipeline 721" "$case_dir/output.log" >/dev/null
+
+start_case "mr-cancels-older-commit-push-pipeline"
+write_graphql 730 73 merge_request_event refs/merge-requests/73/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":730,"source":"merge_request_event","ref":"refs/merge-requests/73/head","status":"running","sha":"sha730","created_at":"2026-01-01T00:00:30Z"},
+  {"id":729,"source":"push","ref":"renovate/kover","status":"running","sha":"sha729","created_at":"2026-01-01T00:00:10Z"}
+]'
+run_controller
+assert_success
+assert_state '[729]'
+
+start_case "protected-source-branch-disables-cross-family"
+write_graphql 740 74 merge_request_event refs/merge-requests/74/head 83955172 magisk3171/XposedSmsCode beta
+write_protected_branches '[{"id":1,"name":"beta"},{"id":2,"name":"main"}]'
+write_pipelines '[
+  {"id":740,"source":"merge_request_event","ref":"refs/merge-requests/74/head","status":"running","sha":"sha740"},
+  {"id":739,"source":"push","ref":"beta","status":"running","sha":"sha740"}
+]'
+run_controller
+assert_success
+assert_state '[]'
+grep -F "source branch beta is protected; cross-family cancellation is disabled" "$case_dir/output.log" >/dev/null
+grep -F "Cross-family cancellation inactive" "$case_dir/output.log" >/dev/null
 
 echo "cancel_older_mr_pipelines tests passed"
