@@ -8,7 +8,8 @@
 #   - telegram release template runs only on v*.*.* tags
 #   - CI script also limits to MAGISK_TELEGRAM_CI_BRANCH / renovate/*
 #   - CI notify requires matched artifacts; bare text fallback is disabled
-#   - image-list notify (.magisk_telegram_images) sends pure text with Images:
+#   - image-list notify (.magisk_telegram_images) sends pure text; the
+#     release image section renders the same one-line-per-registry block
 #
 # Optional CI/CD variables:
 #   TG_API_BASE                default https://api.telegram.org
@@ -716,6 +717,88 @@
         printf '%s' "$value"
       }
 
+      # Registry host of an image ref ("" when the ref omits it, i.e. Docker
+      # Hub shorthand). Same mapping as ci/telegram_send_image_list.sh so both
+      # notification paths render images identically.
+      telegram_registry_host() {
+        local ref=$1 first
+        first="${ref%%/*}"
+        case "$first" in
+          *.*|*:*) printf '%s' "$first" ;;
+          *) printf '' ;;
+        esac
+      }
+
+      # Short human label for the registry an image was pushed to.
+      telegram_registry_label() {
+        local ref=$1 host
+        host="$(telegram_registry_host "$ref")"
+        case "$host" in
+          ''|docker.io|index.docker.io|registry-1.docker.io) printf 'DockerHub' ;;
+          ghcr.io) printf 'GHCR' ;;
+          registry.gitlab.com) printf 'GitLab' ;;
+          gcr.io|*.gcr.io) printf 'GCR' ;;
+          *.amazonaws.com) printf 'ECR' ;;
+          *) printf '%s' "$host" ;;
+        esac
+      }
+
+      # Web page for a pushed image; empty when we cannot derive a meaningful
+      # one (unknown registry or missing CI_PROJECT_URL).
+      telegram_registry_url() {
+        local ref=$1 label name
+        label="$(telegram_registry_label "$ref")"
+        name="${ref%:*}"
+        case "$label" in
+          DockerHub) printf 'https://hub.docker.com/r/%s' "${name#docker.io/}" ;;
+          GitLab)
+            if [ -n "${CI_PROJECT_URL:-}" ]; then
+              printf '%s/-/container_registry' "${CI_PROJECT_URL%/}"
+            fi
+            ;;
+          *) printf '' ;;
+        esac
+      }
+
+      # Render the image block: one line per registry, the registry label
+      # hyperlinked to its web page with the pushed tags as plain text. Refs
+      # whose registry has no derivable web page keep the ref (minus tag) as
+      # the label so no information is dropped.
+      telegram_image_block() {
+        local lines=$1
+        local -a links=() tags=()
+        local line url tag link found i block
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          tag="${line##*:}"
+          url="$(telegram_registry_url "$line")"
+          if [ -n "$url" ]; then
+            link="$(telegram_html_link "$url" "$(telegram_registry_label "$line")")"
+          else
+            link="$(telegram_html_escape "${line%:*}")"
+          fi
+          found=-1
+          for i in "${!links[@]}"; do
+            if [ "${links[$i]}" = "$link" ]; then
+              found=$i
+              break
+            fi
+          done
+          if [ "$found" -ge 0 ]; then
+            tags[$found]+=", $tag"
+          else
+            links+=("$link")
+            tags+=("$tag")
+          fi
+        done <<<"$lines"
+        block=""
+        for i in "${!links[@]}"; do
+          [ -n "$block" ] && block+=$'\n'
+          block+="📦 ${links[$i]}：$(telegram_html_escape "${tags[$i]}")"
+        done
+        printf '%s' "$block"
+      }
+
       telegram_truncate_caption() {
         local value=${1:-}
         local input_file
@@ -1179,16 +1262,13 @@
       release_msg="$release_head"
       # Backend container images, merged from the optional dotenv published by
       # backend:container:manifest. Projects without that job simply skip this.
+      # Rendered as one registry-collapsed hyperlink line per registry, the
+      # same channel style as the release head above.
       if [ "${MAGISK_TELEGRAM_IMAGE_PUBLISH_OK:-}" = "1" ] \
         && [ -n "${MAGISK_TELEGRAM_IMAGE_LIST_COMMAND:-}" ]; then
         image_lines="$(bash -c "${MAGISK_TELEGRAM_IMAGE_LIST_COMMAND}" 2>/dev/null || true)"
         if [ -n "$image_lines" ]; then
-          image_block=""
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            image_block+="📦 $(telegram_html_escape "$line")"$'\n'
-          done <<<"$image_lines"
-          release_msg+=$'\n🖼 Images'$'\n'"${image_block%$'\n'}"
+          release_msg+=$'\n🖼 Images'$'\n'"$(telegram_image_block "$image_lines")"
         fi
       fi
       if [ -n "$release_notes_content" ]; then

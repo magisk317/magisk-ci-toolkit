@@ -53,7 +53,7 @@ CI_PIPELINE_ID=2705536792 \
   bash "$sender" >/dev/null
 
 captured="$(cat "$capture_file")"
-registry_url='https://gitlab.com/magisk3171/NapGram/container_registry'
+registry_url='https://gitlab.com/magisk3171/NapGram/-/container_registry'
 assert_contains "$captured" '✅ NapGram：v0.1.5' \
   "title should carry the human readable version"
 assert_contains "$captured" $'#NapGram #v0_1_5\n' \

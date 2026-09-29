@@ -106,6 +106,8 @@ assert_not_contains "$captured" 'chore(deps): bump fastify' \
   "the commit title line must not be part of the release message"
 assert_not_contains "$captured" '🔗 Changelog:' "release message must not include the old changelog link"
 assert_not_contains "$captured" 'Full Changelog: https://' "raw changelog URLs must not remain in the notes"
+assert_not_contains "$captured" '🖼 Images' \
+  "no image list command means no Images section"
 
 # The mirror coordinates are overridable because they are not always
 # <owner>/<CI_PROJECT_NAME>, for example when the mirror lives under another org.
@@ -132,5 +134,28 @@ owner_rules="$(awk '
 ' "$root_dir/.gitlab/ci/android-release.yml")"
 assert_not_contains "$owner_rules" 'when: manual' "GitLab release must run automatically"
 assert_not_contains "$owner_rules" 'allow_failure: true' "GitLab release must be blocking"
+
+# The backend image section renders one registry-collapsed hyperlink line
+# per registry with the pushed tags as plain text; raw multi-segment refs must
+# never appear.
+captured_images="$(run_release \
+  MAGISK_TELEGRAM_IMAGE_PUBLISH_OK=1 \
+  MAGISK_TELEGRAM_IMAGE_LIST_COMMAND='printf "%s\n" registry.gitlab.com/example/demo/backend:v3.3.1 registry.gitlab.com/example/demo/backend:latest docker.io/example/xinyi-relay-backend:v3.3.1')"
+assert_contains "$captured_images" '🖼 Images' \
+  "the image section header must be present"
+assert_contains "$captured_images" '<a href="https://gitlab.com/example/demo/-/container_registry">GitLab</a>：v3.3.1, latest' \
+  "GitLab registry images must collapse into one labeled hyperlink with tags"
+assert_contains "$captured_images" '<a href="https://hub.docker.com/r/example/xinyi-relay-backend">DockerHub</a>：v3.3.1' \
+  "DockerHub images must link to the Docker Hub repository page"
+assert_not_contains "$captured_images" 'registry.gitlab.com/example' \
+  "raw registry hosts must not leak into the release message"
+assert_not_contains "$captured_images" 'docker.io/example' \
+  "raw docker.io hosts must not leak into the release message"
+
+captured_images_fallback="$(run_release \
+  MAGISK_TELEGRAM_IMAGE_PUBLISH_OK=1 \
+  MAGISK_TELEGRAM_IMAGE_LIST_COMMAND='printf "%s\n" ghcr.io/example/demo/backend:v3.3.1')"
+assert_contains "$captured_images_fallback" '📦 ghcr.io/example/demo/backend：v3.3.1' \
+  "registries without a derivable web page keep the ref minus tag as the label"
 
 echo "GitLab Telegram release contract tests passed"
