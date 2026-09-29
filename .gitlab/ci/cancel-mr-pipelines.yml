@@ -3,6 +3,12 @@
 # coordination. Renovate schedule/web/API pipelines use latest-wins so only
 # one serial Renovate orchestrator remains active for a branch.
 #
+# One wrong character here silently disables the feature: GitLab expands
+# unknown predefined variables to an empty string, and the controller
+# cannot cancel what it cannot name. The MR source branch variable is
+# CI_MERGE_REQUEST_SOURCE_BRANCH_NAME (there is no _NAME-less
+# CI_MERGE_REQUEST_SOURCE_BRANCH); ci/tests/test_ci_predefined_variables.sh
+# guards every referenced predefined variable name.
 # Cross-family cancellation: MR pipelines additionally pass their source
 # branch so the controller can cancel the sibling push pipeline of the same
 # branch. Renovate pushes a branch before opening the MR, so the workflow rule
@@ -19,7 +25,7 @@
     - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
       variables:
         MAGISK_UPSTREAM_REF: "$CI_MERGE_REQUEST_REF_PATH"
-        MAGISK_UPSTREAM_SOURCE_BRANCH: "$CI_MERGE_REQUEST_SOURCE_BRANCH"
+        MAGISK_UPSTREAM_SOURCE_BRANCH: "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
         MAGISK_TRIGGER_PIPELINE_KIND: "mr_or_push"
     - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "push"'
       variables:

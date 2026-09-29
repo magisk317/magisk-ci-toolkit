@@ -66,6 +66,7 @@ shell:test:
       gradle/run_gradle_with_retry.sh
       ci/tests/test_cancel_older_mr_pipelines.sh
       ci/tests/test_cancel_older_renovate_pipelines.sh
+      ci/tests/test_ci_predefined_variables.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_auto_merge_self_renovate_mrs.sh
       ci/tests/test_renovate_serial_loop.sh
@@ -77,6 +78,7 @@ shell:test:
       ci/tests/test_trusted_projects.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
     - bash ci/tests/test_cancel_older_renovate_pipelines.sh
+    - bash ci/tests/test_ci_predefined_variables.sh
     - bash ci/tests/test_auto_merge_upstream_mr.sh
     - bash ci/tests/test_auto_merge_self_renovate_mrs.sh
     - bash ci/tests/test_renovate_serial_loop.sh
@@ -161,15 +163,15 @@ cancel:older:mr:pipelines:
       set -euo pipefail
       merge_status=0
       cancel_status=0
-      if [[ "${MAGISK_UPSTREAM_PIPELINE_SOURCE}" == "merge_request_event" ]]; then
+      if [ "${MAGISK_UPSTREAM_PIPELINE_SOURCE}" = "merge_request_event" ]; then
         bash ci/auto_merge_upstream_mr.sh || merge_status=$?
       fi
-      if [[ "${MAGISK_UPSTREAM_PIPELINE_KIND:-mr_or_push}" == "renovate" ]]; then
+      if [ "${MAGISK_UPSTREAM_PIPELINE_KIND:-mr_or_push}" = "renovate" ]; then
         bash ci/cancel_older_renovate_pipelines.sh || cancel_status=$?
       else
         bash ci/cancel_older_mr_pipelines.sh || cancel_status=$?
       fi
-      if ((cancel_status != 0)); then
+      if [ "$cancel_status" -ne 0 ]; then
         echo "Warning: pipeline cleanup failed; MR merge result is unaffected." >&2
       fi
       exit "$merge_status"
