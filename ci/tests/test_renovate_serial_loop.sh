@@ -16,10 +16,10 @@ count="$(cat "$MOCK_RENOVATE_COUNT_FILE")"
 count=$((count + 1))
 printf '%s\n' "$count" >"$MOCK_RENOVATE_COUNT_FILE"
 case "$MOCK_SCENARIO:$count" in
-  two-rounds:1)
+  two-rounds:1 | locked-race:1)
     printf '%s\n' "open" >"$MOCK_STATE_FILE"
     ;;
-  two-rounds:2)
+  two-rounds:2 | locked-race:2)
     printf '%s\n' "done" >"$MOCK_STATE_FILE"
     ;;
   already-merged:1)
@@ -31,7 +31,7 @@ case "$MOCK_SCENARIO:$count" in
   backlog-after-scan:2)
     printf '%s\n' "done" >"$MOCK_STATE_FILE"
     ;;
-  backlog-before-round:1 | backlog-partial:1)
+  backlog-before-round:1 | backlog-partial:1 | locked-backlog:1)
     printf '%s\n' "done" >"$MOCK_STATE_FILE"
     ;;
   *)
@@ -100,6 +100,12 @@ mr_opened_json() {
     '{iid:$iid,state:"opened",source_project_id:123,source_branch:$branch,
       target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false}'
+}
+
+# GitLab reports "locked" while a merge is being processed; every consumer of
+# an MR response must treat it as transient.
+mr_locked_json() {
+  jq -nc --argjson iid "$1" '{iid:$iid,state:"locked",source_project_id:123,source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",draft:false,has_conflicts:false,merge_when_pipeline_succeeds:false}'
 }
 
 mr_merged_json() {
@@ -259,6 +265,21 @@ if [[ "$url" =~ /merge_requests/([0-9]+)$ ]]; then
     mr_merged_json "$iid" >"$output_file"
     exit 0
   fi
+
+  # Locked interception: MOCK_LOCKED_IID selects the request, MOCK_LOCKED_ONCE
+  # serves the lock exactly once (the marker file disarms it); without ONCE the
+  # lock persists for the whole run (timeout scenario).
+  lock_marker="${MOCK_LOCK_MARKER:-${MOCK_STATE_FILE:-.}/.lock-marker}"
+  if [[ -n "${MOCK_LOCKED_IID:-}" && "$iid" == "$MOCK_LOCKED_IID" ]]; then
+    if [[ "${MOCK_LOCKED_ONCE:-}" != "1" || ! -e "$lock_marker" ]]; then
+      if [[ "${MOCK_LOCKED_ONCE:-}" == "1" && ! -e "$lock_marker" ]]; then
+        : >"$lock_marker"
+      fi
+      mr_locked_json "$iid" >"$output_file"
+      exit 0
+    fi
+  fi
+
   if [[ "$state" == "backlog" ]]; then
     # In a backlog the open/merged state of {!101, !102} is owned by the
     # drain: opened until the merge PUT lands in the merged log.
@@ -310,6 +331,9 @@ run_case() {
     MOCK_SLEEP_LOG="$case_dir/sleep.log" \
     MOCK_CONFLICT_IID="${MOCK_CONFLICT_IID:-}" \
     MOCK_MERGE_HTTP_STATUS="${MOCK_MERGE_HTTP_STATUS:-}" \
+    MOCK_LOCKED_IID="${MOCK_LOCKED_IID:-}" \
+    MOCK_LOCKED_ONCE="${MOCK_LOCKED_ONCE:-}" \
+    MOCK_LOCK_MARKER="$case_dir/lock-marker" \
     CI_API_V4_URL="https://gitlab.example/api/v4" \
     CI_PROJECT_ID="123" \
     CI_PROJECT_DIR="$case_dir/project" \
@@ -406,5 +430,44 @@ grep -F "Renovate merge request !102 has conflicts; backlog merge is skipped." "
 grep -F "Continuing with existing Renovate merge request !102." "$tmp_root/backlog-partial/output.log" >/dev/null
 grep -F "Renovate merge request !102 was not merged into beta after 4 polls" "$tmp_root/backlog-partial/output.log" >/dev/null
 grep -Fx "101" "$tmp_root/backlog-partial/merged.log" >/dev/null
+
+# A merge request locked mid-merge is a transient GitLab state (the
+# controller merge, or this loop's own PUT, is being processed): the wait must
+# keep polling instead of failing. Regression for 2026-09-29 !178, where the
+# controller merge landed one second after the loop's poll had already died on
+# "unsupported state locked" and failed the whole schedule pipeline.
+MOCK_LOCKED_IID=101 MOCK_LOCKED_ONCE=1 run_case locked-race none
+[[ "$(cat "$tmp_root/locked-race/status")" == "0" ]] || {
+  cat "$tmp_root/locked-race/output.log" >&2
+  exit 1
+}
+grep -F "Merge request !101 is locked (a merge is in progress); waiting (1/4)" "$tmp_root/locked-race/output.log" >/dev/null
+grep -F "Confirmed Renovate merge request !101 is included in beta" "$tmp_root/locked-race/output.log" >/dev/null
+[[ "$(cat "$tmp_root/locked-race/renovate-count")" == "2" ]] || exit 1
+
+# The same transient lock inside the backlog drain: merge_renovate_mr must fall
+# through to its sha-pinned PUT (405/already-merged counts as done), not fail.
+MOCK_LOCKED_IID=101 MOCK_LOCKED_ONCE=1 run_case locked-backlog backlog
+[[ "$(cat "$tmp_root/locked-backlog/status")" == "0" ]] || {
+  cat "$tmp_root/locked-backlog/output.log" >&2
+  exit 1
+}
+grep -F "Renovate merge request !101 is locked (a merge is in progress); retrying the merge." "$tmp_root/locked-backlog/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/locked-backlog/output.log" >/dev/null
+grep -F "Starting Renovate serial round 1/2" "$tmp_root/locked-backlog/output.log" >/dev/null
+[[ "$(cat "$tmp_root/locked-backlog/renovate-count")" == "2" ]] || exit 1
+
+# A permanently locked request still terminates the loop - through the normal
+# timeout with the real reason - instead of the "unsupported state" dead end.
+MOCK_LOCKED_IID=101 run_case locked-timeout open
+[[ "$(cat "$tmp_root/locked-timeout/status")" == "1" ]] || {
+  cat "$tmp_root/locked-timeout/output.log" >&2
+  exit 1
+}
+grep -F "Renovate merge request !101 was not merged into beta after 4 polls" "$tmp_root/locked-timeout/output.log" >/dev/null
+if grep -F "unsupported state locked" "$tmp_root/locked-timeout/output.log" >/dev/null; then
+  echo "a locked request must not be reported as an unsupported state" >&2
+  exit 1
+fi
 
 echo "serial Renovate loop tests passed"

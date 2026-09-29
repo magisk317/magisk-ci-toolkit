@@ -166,8 +166,9 @@ merge_api_curl() {
 
 # merge_renovate_mr <iid>: merge one open Renovate merge request at its HEAD
 # sha with the controller semantics: draft, conflicting and pipeline-gated
-# requests are skipped, transient readiness is retried with a backoff ladder,
-# and a request that is already merged or closed counts as done.
+# requests are skipped, transient readiness (including a request locked while
+# its merge is being processed) is retried with a backoff ladder, and a
+# request that is already merged or closed counts as done.
 merge_renovate_mr() {
   local iid="$1"
   local attempt
@@ -192,6 +193,13 @@ merge_renovate_mr() {
       closed)
         echo "Renovate merge request !${iid} was closed without merging; skipping."
         return 0
+        ;;
+      # GitLab reports "locked" while a merge is being processed (2026-09-29
+      # !178: the controller merge landed one second after a poll had already
+      # failed on this state). Transient: fall through to the sha-pinned PUT,
+      # which answers 405/already-merged when the concurrent merge wins.
+      locked)
+        echo "Renovate merge request !${iid} is locked (a merge is in progress); retrying the merge."
         ;;
       opened) ;;
       *)
@@ -359,6 +367,12 @@ wait_for_merge() {
     case "$state" in
       opened)
         echo "Waiting for Renovate merge request !${iid} to be merged (${poll}/${max_polls})."
+        ;;
+      # "locked" is GitLab's transient state while a merge is being processed.
+      # The controller merge parks the request here for a few seconds; dying on
+      # it raced the merge and failed a healthy schedule pipeline (!178).
+      locked)
+        echo "Merge request !${iid} is locked (a merge is in progress); waiting (${poll}/${max_polls})."
         ;;
       merged)
         merge_sha="$(jq -r '.merge_commit_sha // .squash_commit_sha // empty' "$mr_file")"
