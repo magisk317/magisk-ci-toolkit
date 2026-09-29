@@ -409,9 +409,12 @@ publish, or Telegram notification.
 
 Configure `MAGISK_CI_PIPELINE_CONTROL_TOKEN` only in the toolkit project as a
 protected, masked, hidden variable. The token must be a fine-grained personal
-access token scoped to the `magisk3171` group with only `Pipeline: Read` and
-`Pipeline: Update`. Consumer projects must be in the toolkit project's inbound
-CI job-token allowlist; they never receive the control token.
+access token scoped to the `magisk3171` group with only `Pipeline: Read`,
+`Pipeline: Update`, and `Protected Branch: Read`. `Protected Branch: Read`
+backs the cross-family cancellation fail-safe that checks whether a merge
+request source branch is protected. Consumer projects must be in the toolkit
+project's inbound CI job-token allowlist; they never receive the control
+token.
 
 Configure `MAGISK_CI_MR_AUTOMERGE_TOKEN` alongside it as another protected,
 masked, hidden variable. Use a separate fine-grained personal access token
