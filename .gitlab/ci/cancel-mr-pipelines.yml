@@ -15,12 +15,6 @@
   stage: .pre
   interruptible: true
   allow_failure: true
-  # The bridge only creates the downstream pipeline and waits for it
-  # (strategy: depend). Keeping it on the amd64 runner prevents that wait from
-  # occupying a slot on the contended arm64 runner, where the gradle jobs of
-  # the very pipelines this controller cancels are queued.
-  tags:
-    - magisk-amd64-linux
   rules:
     - if: '$MAGISK_CANCEL_OLDER_MR_PIPELINES == "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
       variables:
