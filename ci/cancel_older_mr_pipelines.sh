@@ -7,6 +7,8 @@ readonly ACTIVE_PIPELINE_STATUSES='["created","waiting_for_resource","preparing"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=ci/trusted_projects.sh
 source "$script_dir/trusted_projects.sh"
+# shellcheck source=ci/api_retry.sh
+source "$script_dir/api_retry.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -102,8 +104,7 @@ if [[ "$MAGISK_UPSTREAM_PIPELINE_SOURCE" == "merge_request_event" && -n "$upstre
     echo "Upstream source branch '${upstream_source_branch}' is not eligible for cross-family cancellation."
   else
     protected_branches_file="$tmp_dir/protected-branches.json"
-    if api_curl \
-      --output "$protected_branches_file" \
+    if api_get_with_retry api_curl "$protected_branches_file" \
       "${CI_API_V4_URL}/projects/${upstream_project_id}/protected_branches?per_page=100" \
       && jq -e 'type == "array" and all(.[]; (.name | type) == "string")' "$protected_branches_file" >/dev/null; then
       if jq -e --arg branch "$upstream_source_branch" 'any(.[]; .name == $branch)' "$protected_branches_file" >/dev/null; then
@@ -121,8 +122,7 @@ fi
 api_base="${CI_API_V4_URL}/projects/${upstream_project_id}/pipelines"
 
 upstream_pipeline_file="$tmp_dir/upstream-pipeline.json"
-if ! api_curl \
-  --output "$upstream_pipeline_file" \
+if ! api_get_with_retry api_curl "$upstream_pipeline_file" \
   "${api_base}/${upstream_pipeline_id}"; then
   fail "failed to read upstream pipeline ${upstream_pipeline_id}"
 fi
@@ -150,13 +150,12 @@ list_merge_request_pipelines() {
   while :; do
     ((page <= max_pages)) || fail "pipeline pagination exceeded ${max_pages} pages"
     body_file="$tmp_dir/pipelines-page-${page}.json"
-    if ! api_curl \
+    if ! api_get_with_retry api_curl "$body_file" \
       --get \
       --data-urlencode "order_by=id" \
       --data-urlencode "sort=desc" \
       --data-urlencode "per_page=${page_size}" \
       --data-urlencode "page=${page}" \
-      --output "$body_file" \
       "$api_base"; then
       fail "failed to list merge request pipelines on page ${page}"
     fi

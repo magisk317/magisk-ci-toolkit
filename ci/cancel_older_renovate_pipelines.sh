@@ -8,6 +8,8 @@ readonly RENOVATE_PIPELINE_SOURCES='["schedule","web","api"]'
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=ci/trusted_projects.sh
 source "$script_dir/trusted_projects.sh"
+# shellcheck source=ci/api_retry.sh
+source "$script_dir/api_retry.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -92,9 +94,10 @@ api_curl() {
 }
 
 upstream_pipeline_file="$tmp_dir/upstream-pipeline.json"
-api_curl --output "$upstream_pipeline_file" \
-  "${api_base}/pipelines/${MAGISK_UPSTREAM_PIPELINE_ID}" || \
+if ! api_get_with_retry api_curl "$upstream_pipeline_file" \
+  "${api_base}/pipelines/${MAGISK_UPSTREAM_PIPELINE_ID}"; then
   fail "failed to read upstream pipeline ${MAGISK_UPSTREAM_PIPELINE_ID}"
+fi
 jq -e \
   --argjson pipeline_id "$MAGISK_UPSTREAM_PIPELINE_ID" \
   --argjson pipeline_iid "$MAGISK_UPSTREAM_PIPELINE_IID" \
@@ -112,11 +115,12 @@ jq -e \
 list_pipeline_jobs() {
   local pipeline_id="$1"
   local output_file="$2"
-  api_curl --get \
+  if ! api_get_with_retry api_curl "$output_file" \
+    --get \
     --data-urlencode 'per_page=100' \
-    --output "$output_file" \
-    "${api_base}/pipelines/${pipeline_id}/jobs" || \
+    "${api_base}/pipelines/${pipeline_id}/jobs"; then
     fail "failed to list jobs for Renovate pipeline ${pipeline_id}"
+  fi
   jq -e 'type == "array"' "$output_file" >/dev/null || \
     fail "jobs response for pipeline ${pipeline_id} is invalid"
 }
@@ -140,12 +144,12 @@ list_renovate_pipelines() {
   while :; do
     ((page <= max_pages)) || fail "pipeline pagination exceeded ${max_pages} pages"
     response_file="$tmp_dir/pipelines-page-${page}.json"
-    if ! api_curl --get \
+    if ! api_get_with_retry api_curl "$response_file" \
+      --get \
       --data-urlencode 'order_by=id' \
       --data-urlencode 'sort=desc' \
       --data-urlencode "per_page=${page_size}" \
       --data-urlencode "page=${page}" \
-      --output "$response_file" \
       "${api_base}/pipelines"; then
       fail "failed to list pipelines on page ${page}"
     fi

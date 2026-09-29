@@ -390,6 +390,13 @@ coordinated separately: the newest Renovate pipeline for the trusted target
 branch wins, and older active Renovate pipelines are canceled. This is API-level
 latest-wins coordination, not a GitLab resource lock.
 
+Every controller API call goes through the shared retry ladder in
+`ci/api_retry.sh`: transient failures (curl exit 6/7/28/35/52/55/56/60 or HTTP
+408/429/5xx) are retried up to 6 times with 2 s doubling backoff, while
+deterministic failures (404, 401/403) fail on the first attempt. The cancel
+POSTs inside the cancel scripts additionally rely on the reconcile loop, which
+re-lists and re-cancels stale pipelines for 3 passes.
+
 Automatic merge is limited to a non-Draft MR whose source project is the same
 allowlisted project and whose target is that project's configured default
 branch. The controller verifies the MR HEAD against the upstream pipeline SHA,

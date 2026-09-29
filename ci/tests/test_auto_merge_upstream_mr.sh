@@ -63,12 +63,12 @@ done
   exit 64
 }
 
-# maybe_fail_get <count-file> <failures-spec>: emulates curl for a GET whose
-# per-attempt behaviour is scripted, then never returns. Each spec entry is
-# `ok` (serve the real response), `curl:<exit>` (network-level failure: no
-# body, curl prints 000 for %{http_code}) or an HTTP status (curl --fail exits
-# 22 and prints the status). The last entry repeats once exceeded.
-maybe_fail_get() {
+# maybe_fail_call <count-file> <failures-spec>: emulates curl for a GET or
+# POST whose per-attempt behaviour is scripted, then never returns. Each spec
+# entry is `ok` (serve the real response), `curl:<exit>` (network-level failure:
+# no body, curl prints 000 for %{http_code}) or an HTTP status (curl --fail
+# exits 22 and prints the status). The last entry repeats once exceeded.
+maybe_fail_call() {
   local count_file="$1"
   local failures="$2"
   local count index behavior
@@ -105,7 +105,7 @@ if [[ "$url" == */api/graphql ]]; then
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines/[0-9]+$ ]]; then
-  maybe_fail_get "$MOCK_PIPELINE_GET_COUNT_FILE" "${MOCK_PIPELINE_GET_FAILURES:-ok}"
+  maybe_fail_call "$MOCK_PIPELINE_GET_COUNT_FILE" "${MOCK_PIPELINE_GET_FAILURES:-ok}"
   jq '. + {created_at: (.created_at // "2026-01-01T00:00:00.200Z")}' "$MOCK_PIPELINE_FILE" >"$output_file"
   exit 0
 fi
@@ -116,15 +116,17 @@ if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines$ ]]; then
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/merge_requests/[0-9]+$ ]]; then
-  maybe_fail_get "$MOCK_MR_GET_COUNT_FILE" "${MOCK_MR_GET_FAILURES:-ok}"
+  maybe_fail_call "$MOCK_MR_GET_COUNT_FILE" "${MOCK_MR_GET_FAILURES:-ok}"
   cp "$MOCK_MR_FILE" "$output_file"
   exit 0
 fi
 
 if [[ "$method" == "POST" && "$url" =~ /projects/[0-9]+/merge_requests/[0-9]+/cancel_merge_when_pipeline_succeeds$ ]]; then
+  maybe_fail_call "$MOCK_CANCEL_AUTO_MERGE_POST_COUNT_FILE" "${MOCK_CANCEL_AUTO_MERGE_POST_FAILURES:-ok}"
   count="$(cat "$MOCK_CANCEL_AUTO_MERGE_COUNT_FILE")"
   printf '%s\n' "$((count + 1))" >"$MOCK_CANCEL_AUTO_MERGE_COUNT_FILE"
-  case "${MOCK_CANCEL_AUTO_MERGE_STATUS:-200}" in
+  http_status="${MOCK_CANCEL_AUTO_MERGE_STATUS:-200}"
+  case "$http_status" in
     200 | 201)
       jq '.merge_when_pipeline_succeeds = false' "$MOCK_MR_FILE" >"$output_file"
       ;;
@@ -135,8 +137,14 @@ if [[ "$method" == "POST" && "$url" =~ /projects/[0-9]+/merge_requests/[0-9]+/ca
       jq -n '{message: "cancel failed"}' >"$output_file"
       ;;
   esac
-  [[ "$write_out" == "%{http_code}" ]] && printf '%s' "${MOCK_CANCEL_AUTO_MERGE_STATUS:-200}"
-  exit 0
+  # Emulate curl --fail: non-2xx exits 22 (the retry ladder classifies it),
+  # while 2xx exits 0. Real curl drops the body on HTTP errors; callers never
+  # read it on that path, so the mock keeps writing it.
+  if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' "$http_status"; fi
+  if [[ "$http_status" =~ ^2 ]]; then
+    exit 0
+  fi
+  exit 22
 fi
 
 if [[ "$method" == "PUT" && "$url" =~ /projects/[0-9]+/merge_requests/[0-9]+/merge$ ]]; then
@@ -181,6 +189,7 @@ start_case() {
   mkdir -p "$case_dir"
   printf '0\n' >"$case_dir/merge-count"
   printf '0\n' >"$case_dir/cancel-auto-merge-count"
+  printf '0\n' >"$case_dir/cancel-auto-merge-post-count"
   printf '0\n' >"$case_dir/mr-get-count"
   printf '0\n' >"$case_dir/pipeline-get-count"
   : >"$case_dir/sleep.log"
@@ -209,6 +218,8 @@ run_controller() {
     MOCK_MR_FILE="$case_dir/mr.json" \
     MOCK_MERGE_COUNT_FILE="$case_dir/merge-count" \
     MOCK_CANCEL_AUTO_MERGE_COUNT_FILE="$case_dir/cancel-auto-merge-count" \
+    MOCK_CANCEL_AUTO_MERGE_POST_COUNT_FILE="$case_dir/cancel-auto-merge-post-count" \
+    MOCK_CANCEL_AUTO_MERGE_POST_FAILURES="${MOCK_CANCEL_AUTO_MERGE_POST_FAILURES:-ok}" \
     MOCK_MR_GET_COUNT_FILE="$case_dir/mr-get-count" \
     MOCK_PIPELINE_GET_COUNT_FILE="$case_dir/pipeline-get-count" \
     MOCK_MR_GET_FAILURES="${MOCK_MR_GET_FAILURES:-ok}" \
@@ -316,6 +327,38 @@ assert_merge_count 1
 assert_cancel_auto_merge_count 1
 grep -F "Canceled the existing pipeline-gated auto-merge" "$case_dir/output.log" >/dev/null
 
+start_case "cancel-auto-merge-post-retries-transient-network-failure"
+jq '.merge_when_pipeline_succeeds = true' "$case_dir/mr.json" >"$case_dir/mr.tmp"
+mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+MOCK_CANCEL_AUTO_MERGE_POST_FAILURES="curl:35,ok" run_controller
+assert_success
+assert_merge_count 1
+assert_cancel_auto_merge_count 1
+grep -F "Transient failure calling" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+grep -F "Canceled the existing pipeline-gated auto-merge" "$case_dir/output.log" >/dev/null
+
+start_case "cancel-auto-merge-post-retries-transient-http-503"
+jq '.merge_when_pipeline_succeeds = true' "$case_dir/mr.json" >"$case_dir/mr.tmp"
+mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+MOCK_CANCEL_AUTO_MERGE_POST_FAILURES="503,ok" run_controller
+assert_success
+assert_merge_count 1
+assert_cancel_auto_merge_count 1
+grep -F "(curl exit 22, HTTP 503)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "cancel-auto-merge-post-persistent-transient-is-bounded"
+jq '.merge_when_pipeline_succeeds = true' "$case_dir/mr.json" >"$case_dir/mr.tmp"
+mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+MOCK_CANCEL_AUTO_MERGE_POST_FAILURES="curl:35" run_controller
+assert_failure
+assert_merge_count 0
+assert_cancel_auto_merge_count 0
+printf '2\n4\n8\n16\n32\n' | diff -u - "$case_dir/sleep.log"
+grep -F "failed to cancel the existing pipeline-gated auto-merge (HTTP 000)" "$case_dir/output.log" >/dev/null
+
 start_case "retry-on-transient-mergeability"
 MOCK_MERGE_STATUSES="405,200" run_controller
 assert_success
@@ -365,7 +408,7 @@ start_case "mr-read-retries-transient-network-failure"
 MOCK_MR_GET_FAILURES="curl:35,ok" run_controller
 assert_success
 assert_merge_count 1
-grep -F "Transient failure reading" "$case_dir/output.log" >/dev/null
+grep -F "Transient failure calling" "$case_dir/output.log" >/dev/null
 grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
 grep -F "retrying in 2s (1/6)" "$case_dir/output.log" >/dev/null
 grep -Fx '2' "$case_dir/sleep.log" >/dev/null

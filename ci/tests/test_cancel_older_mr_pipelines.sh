@@ -18,6 +18,7 @@ method="GET"
 url=""
 page=1
 per_page=100
+write_out=""
 
 while (($# > 0)); do
   case "$1" in
@@ -27,6 +28,10 @@ while (($# > 0)); do
       ;;
     --request)
       method="$2"
+      shift 2
+      ;;
+    --write-out)
+      write_out="$2"
       shift 2
       ;;
     --data-urlencode)
@@ -58,12 +63,49 @@ done
   exit 64
 }
 
+# maybe_fail_call <count-file> <failures-spec>: emulates curl for a GET or
+# POST whose per-attempt behaviour is scripted, then never returns. Each spec
+# entry is `ok` (serve the real response), `curl:<exit>` (network-level failure:
+# no body, curl prints 000 for %{http_code}) or an HTTP status (curl --fail
+# exits 22 and prints the status). The last entry repeats once exceeded.
+maybe_fail_call() {
+  local count_file="$1"
+  local failures="$2"
+  local count index behavior
+  local -a behaviors=()
+
+  count="$(cat "$count_file")"
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$count_file"
+  IFS=',' read -r -a behaviors <<<"$failures"
+  index=$((count - 1))
+  if ((index >= ${#behaviors[@]})); then
+    index=$((${#behaviors[@]} - 1))
+  fi
+  behavior="${behaviors[$index]}"
+  case "$behavior" in
+    ok)
+      return 0
+      ;;
+    curl:*)
+      if [[ "$write_out" == "%{http_code}" ]]; then printf '000'; fi
+      echo "curl: (${behavior#curl:}) simulated connection failure" >&2
+      exit "${behavior#curl:}"
+      ;;
+    *)
+      if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' "$behavior"; fi
+      exit 22
+      ;;
+  esac
+}
+
 if [[ "$url" == */api/graphql ]]; then
   echo "unexpected GraphQL request" >&2
   exit 64
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines$ ]]; then
+  maybe_fail_call "$MOCK_PIPELINES_LIST_COUNT_FILE" "${MOCK_PIPELINES_LIST_GET_FAILURES:-ok}"
   printf '%s\n' "$page" >>"$MOCK_PAGE_LOG"
   start=$(((page - 1) * per_page))
   stop=$((start + per_page))
@@ -85,6 +127,7 @@ if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines$ ]]; then
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines/([0-9]+)$ ]]; then
+  maybe_fail_call "$MOCK_UPSTREAM_PIPELINE_COUNT_FILE" "${MOCK_UPSTREAM_PIPELINE_GET_FAILURES:-ok}"
   pipeline_id="${BASH_REMATCH[1]}"
   jq \
     --argjson id "$pipeline_id" \
@@ -112,6 +155,7 @@ if [[ "$method" == "POST" && "$url" =~ /projects/[0-9]+/pipelines/([0-9]+)/cance
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/protected_branches ]]; then
+  maybe_fail_call "$MOCK_PROTECTED_BRANCHES_COUNT_FILE" "${MOCK_PROTECTED_BRANCHES_GET_FAILURES:-ok}"
   jq . "${MOCK_PROTECTED_BRANCHES_FILE:?MOCK_PROTECTED_BRANCHES_FILE is required}" >"$output_file"
   exit 0
 fi
@@ -120,6 +164,13 @@ echo "mock curl: unsupported request ${method} ${url}" >&2
 exit 64
 MOCK_CURL
 chmod +x "$mock_bin/curl"
+
+cat >"$mock_bin/sleep" <<'MOCK_SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$1" >>"$MOCK_SLEEP_LOG"
+MOCK_SLEEP
+chmod +x "$mock_bin/sleep"
 
 case_dir=""
 run_status=0
@@ -132,6 +183,10 @@ start_case() {
   printf '[]\n' >"$case_dir/protected-branches.json"
   : >"$case_dir/pages.log"
   : >"$case_dir/cancel-attempts.log"
+  : >"$case_dir/sleep.log"
+  printf '0\n' >"$case_dir/upstream-pipeline-count"
+  printf '0\n' >"$case_dir/pipelines-list-count"
+  printf '0\n' >"$case_dir/protected-branches-count"
 }
 
 write_graphql() {
@@ -212,6 +267,13 @@ run_controller() {
     MOCK_PROTECTED_BRANCHES_FILE="$case_dir/protected-branches.json" \
     MOCK_PAGE_LOG="$case_dir/pages.log" \
     MOCK_CANCEL_ATTEMPT_LOG="$case_dir/cancel-attempts.log" \
+    MOCK_UPSTREAM_PIPELINE_COUNT_FILE="$case_dir/upstream-pipeline-count" \
+    MOCK_PIPELINES_LIST_COUNT_FILE="$case_dir/pipelines-list-count" \
+    MOCK_PROTECTED_BRANCHES_COUNT_FILE="$case_dir/protected-branches-count" \
+    MOCK_UPSTREAM_PIPELINE_GET_FAILURES="${MOCK_UPSTREAM_PIPELINE_GET_FAILURES:-ok}" \
+    MOCK_PIPELINES_LIST_GET_FAILURES="${MOCK_PIPELINES_LIST_GET_FAILURES:-ok}" \
+    MOCK_PROTECTED_BRANCHES_GET_FAILURES="${MOCK_PROTECTED_BRANCHES_GET_FAILURES:-ok}" \
+    MOCK_SLEEP_LOG="$case_dir/sleep.log" \
     MOCK_FAIL_CANCEL_IDS="$fail_ids" \
     CI_API_V4_URL="https://gitlab.example/api/v4" \
     CI_API_GRAPHQL_URL="https://gitlab.example/api/graphql" \
@@ -408,6 +470,165 @@ run_controller
 assert_success
 assert_state '[]'
 grep -F "source branch beta is protected; cross-family cancellation is disabled" "$case_dir/output.log" >/dev/null
+grep -F "Cross-family cancellation inactive" "$case_dir/output.log" >/dev/null
+
+start_case "upstream-pipeline-read-retries-transient-http-503"
+write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
+  {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"}
+]'
+MOCK_UPSTREAM_PIPELINE_GET_FAILURES="503,ok" run_controller
+assert_success
+assert_state '[599]'
+grep -F "Transient failure calling" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 22, HTTP 503)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "pipeline-list-read-retries-transient-network-failure"
+write_graphql 200 20 merge_request_event refs/merge-requests/20/head 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":200,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"running","sha":"sha200"},
+  {"id":199,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"pending"},
+  {"id":198,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"success"},
+  {"id":197,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"manual"},
+  {"id":196,"source":"merge_request_event","ref":"refs/merge-requests/20/head","status":"failed"}
+]'
+MOCK_PIPELINES_LIST_GET_FAILURES="curl:35,ok" run_controller
+assert_success
+assert_state '[197,199]'
+grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "protected-branches-read-retries-transient-http-503"
+write_graphql 700 70 merge_request_event refs/merge-requests/70/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_protected_branches '[]'
+write_pipelines '[
+  {"id":700,"source":"merge_request_event","ref":"refs/merge-requests/70/head","status":"running","sha":"sha700"},
+  {"id":699,"source":"push","ref":"renovate/kover","status":"running","sha":"sha700"},
+  {"id":698,"source":"push","ref":"beta","status":"running","sha":"sha700"}
+]'
+MOCK_PROTECTED_BRANCHES_GET_FAILURES="503,ok" run_controller
+assert_success
+assert_state '[699]'
+grep -F "Cross-family cancellation enabled for source branch renovate/kover" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 22, HTTP 503)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "pipelines-list-read-retries-transient-network-failure"
+write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
+  {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"},
+  {"id":598,"source":"merge_request_event","ref":"refs/merge-requests/58/head","status":"running","created_at":"2026-01-01T00:00:58Z"}
+]'
+MOCK_PIPELINES_LIST_GET_FAILURES="curl:35,ok" run_controller
+assert_success
+assert_state '[599]'
+grep -F "Canceling older MR/push pipeline 599" "$case_dir/output.log" >/dev/null
+grep -F "Transient failure calling" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
+grep -F "retrying in 2s (1/6)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "pipelines-list-read-retries-transient-http-503"
+write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
+  {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"},
+  {"id":598,"source":"merge_request_event","ref":"refs/merge-requests/58/head","status":"running","created_at":"2026-01-01T00:00:58Z"}
+]'
+MOCK_PIPELINES_LIST_GET_FAILURES="503,ok" run_controller
+assert_success
+assert_state '[599]'
+grep -F "(curl exit 22, HTTP 503)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "pipelines-list-read-persistent-transient-is-bounded"
+write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
+  {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"}
+]'
+MOCK_PIPELINES_LIST_GET_FAILURES="curl:35" run_controller
+assert_failure
+assert_state '[]'
+printf '2\n4\n8\n16\n32\n' | diff -u - "$case_dir/sleep.log"
+grep -F "failed to list merge request pipelines on page 1" "$case_dir/output.log" >/dev/null
+grep -F "after 6 attempts" "$case_dir/output.log" >/dev/null
+
+start_case "upstream-pipeline-read-retries-transient-network-failure"
+write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
+  {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"},
+  {"id":598,"source":"merge_request_event","ref":"refs/merge-requests/58/head","status":"running","created_at":"2026-01-01T00:00:58Z"}
+]'
+MOCK_UPSTREAM_PIPELINE_GET_FAILURES="curl:35,ok" run_controller
+assert_success
+assert_state '[599]'
+grep -F "Transient failure calling" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
+grep -F "retrying in 2s (1/6)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "upstream-pipeline-read-persistent-transient-is-bounded"
+write_graphql 600 60 push main 83955143 magisk3171/MiPushFramework
+write_pipelines '[
+  {"id":600,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:01:00Z","sha":"sha600"},
+  {"id":599,"source":"push","ref":"main","status":"running","created_at":"2026-01-01T00:00:59Z"}
+]'
+MOCK_UPSTREAM_PIPELINE_GET_FAILURES="curl:35" run_controller
+assert_failure
+assert_state '[]'
+printf '2\n4\n8\n16\n32\n' | diff -u - "$case_dir/sleep.log"
+grep -F "failed to read upstream pipeline 600" "$case_dir/output.log" >/dev/null
+grep -F "after 6 attempts" "$case_dir/output.log" >/dev/null
+
+start_case "protected-branches-read-retries-transient-network-failure"
+write_graphql 700 70 merge_request_event refs/merge-requests/70/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":700,"source":"merge_request_event","ref":"refs/merge-requests/70/head","status":"running","sha":"sha700"},
+  {"id":699,"source":"push","ref":"renovate/kover","status":"running","sha":"sha700"},
+  {"id":698,"source":"push","ref":"beta","status":"running","sha":"sha700"}
+]'
+MOCK_PROTECTED_BRANCHES_GET_FAILURES="curl:35,ok" run_controller
+assert_success
+assert_state '[699]'
+grep -F "Cross-family cancellation enabled for source branch renovate/kover" "$case_dir/output.log" >/dev/null
+grep -F "Transient failure calling" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
+grep -F "retrying in 2s (1/6)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "protected-branches-read-persistent-failure-disables-cross-family"
+write_graphql 700 70 merge_request_event refs/merge-requests/70/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":700,"source":"merge_request_event","ref":"refs/merge-requests/70/head","status":"running","sha":"sha700"},
+  {"id":699,"source":"push","ref":"renovate/kover","status":"running","sha":"sha700"},
+  {"id":698,"source":"push","ref":"beta","status":"running","sha":"sha700"}
+]'
+MOCK_PROTECTED_BRANCHES_GET_FAILURES="curl:35" run_controller
+assert_success
+assert_state '[]'
+printf '2\n4\n8\n16\n32\n' | diff -u - "$case_dir/sleep.log"
+grep -F "Warning: unable to read protected branches" "$case_dir/output.log" >/dev/null
+grep -F "Cross-family cancellation inactive" "$case_dir/output.log" >/dev/null
+
+start_case "protected-branches-read-404-is-not-retried"
+write_graphql 700 70 merge_request_event refs/merge-requests/70/head 83955172 magisk3171/XposedSmsCode renovate/kover
+write_pipelines '[
+  {"id":700,"source":"merge_request_event","ref":"refs/merge-requests/70/head","status":"running","sha":"sha700"},
+  {"id":699,"source":"push","ref":"renovate/kover","status":"running","sha":"sha700"}
+]'
+MOCK_PROTECTED_BRANCHES_GET_FAILURES="404" run_controller
+assert_success
+assert_state '[]'
+[[ ! -s "$case_dir/sleep.log" ]] || {
+  echo "Expected no retries for HTTP 404" >&2
+  exit 1
+}
+grep -F "Warning: unable to read protected branches" "$case_dir/output.log" >/dev/null
 grep -F "Cross-family cancellation inactive" "$case_dir/output.log" >/dev/null
 
 echo "cancel_older_mr_pipelines tests passed"

@@ -6,6 +6,8 @@ readonly CONTROLLER_PROJECT_PATH="magisk3171/shared/magisk-ci-toolkit"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=ci/trusted_projects.sh
 source "$script_dir/trusted_projects.sh"
+# shellcheck source=ci/api_retry.sh
+source "$script_dir/api_retry.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -49,8 +51,6 @@ require_unsigned_integer "MAGISK_UPSTREAM_PIPELINE_IID" "$MAGISK_UPSTREAM_PIPELI
 
 readonly merge_attempts=6
 readonly merge_delay=2
-readonly read_attempts=6
-readonly read_delay=2
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -67,86 +67,6 @@ pipeline_api_curl() {
 
 merge_api_curl() {
   curl --silent --show-error --location "${merge_auth_header[@]}" "$@"
-}
-
-# Curl exit codes that justify another try: DNS failure (6), connection
-# refused/reset (7), operation timeout (28), SSL/TLS handshake trouble (35,
-# 60), empty reply from the server (52) and send/receive failures (55, 56).
-# HTTP-layer failures (curl 22) are classified by status code instead.
-curl_exit_is_transient() {
-  case "$1" in
-    6 | 7 | 28 | 35 | 52 | 55 | 56 | 60) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-http_status_is_retryable() {
-  case "$1" in
-    408 | 429 | 5??) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# api_get_with_retry <curl_fn> <output_file> [curl args...] <url>
-#
-# GET through one of the api_curl wrappers, retrying transient network
-# failures and HTTP 408/429/5xx with exponential backoff (read_delay doubling,
-# read_attempts attempts). Everything else — 404, 401/403, malformed requests
-# — fails immediately: retrying those only delays a deterministic error.
-# 2026-09-29, MiPush pipeline 2892824485: a single `curl: (35) Recv failure:
-# Connection reset by peer` on the merge-request read killed the controller
-# before it ever merged, and the serial loop then burned its full 120-poll
-# window while the merge request sat healthy and green.
-api_get_with_retry() {
-  local curl_fn="$1"
-  local output_file="$2"
-  shift 2
-  local url="${*: -1}"
-  local extra_args=("${@:1:$(($# - 1))}")
-
-  local attempt=1
-  local http_code
-  local curl_rc
-  local retryable
-  local delay="$read_delay"
-
-  while :; do
-    http_code="$("$curl_fn" --fail --silent --show-error \
-      --output "$output_file" \
-      --write-out '%{http_code}' \
-      "${extra_args[@]}" \
-      "$url")"
-    curl_rc=$?
-
-    if ((curl_rc == 0)); then
-      return 0
-    fi
-
-    retryable=0
-    if ((curl_rc == 22)) && http_status_is_retryable "$http_code"; then
-      retryable=1
-    elif ((curl_rc != 22)) && curl_exit_is_transient "$curl_rc"; then
-      retryable=1
-    fi
-
-    if ((retryable == 0)) || ((attempt >= read_attempts)); then
-      # Note: `${retryable:+...}` would be wrong here — `retryable=0` is
-      # non-null, so the suffix would print even for a first-attempt 404.
-      # The attempt count is the honest condition: "after N attempts" only
-      # makes sense once a retry actually happened.
-      local attempts_note=""
-      if ((attempt > 1)); then
-        attempts_note=" after ${attempt} attempts"
-      fi
-      echo "Error: GET ${url} failed (curl exit ${curl_rc}, HTTP ${http_code:-none}${attempts_note})" >&2
-      return 1
-    fi
-
-    echo "Transient failure reading ${url} (curl exit ${curl_rc}, HTTP ${http_code:-none}); retrying in ${delay}s (${attempt}/${read_attempts})." >&2
-    sleep "$delay"
-    delay=$((delay * 2))
-    attempt=$((attempt + 1))
-  done
 }
 
 [[ "$MAGISK_UPSTREAM_PIPELINE_SOURCE" == "merge_request_event" ]] || fail "upstream pipeline is not a merge request pipeline"
@@ -263,14 +183,14 @@ cancel_scheduled_auto_merge() {
   fi
 
   cancel_file="$tmp_dir/cancel-auto-merge.json"
-  if ! http_status="$(
-    merge_api_curl \
-      --request POST \
-      --output "$cancel_file" \
-      --write-out '%{http_code}' \
-      "${mr_api_url}/cancel_merge_when_pipeline_succeeds"
-  )"; then
-    fail "failed to cancel the existing pipeline-gated auto-merge"
+  # POST through the same retry ladder as the reads: a transient network
+  # failure here would otherwise kill the controller after the MR was already
+  # validated — the failure class pipeline 2892824485 exposed on the read
+  # path, reached a second time through the pipeline-gated auto-merge path.
+  if ! http_status="$(api_write_with_retry merge_api_curl "$cancel_file" \
+    --request POST \
+    "${mr_api_url}/cancel_merge_when_pipeline_succeeds")"; then
+    fail "failed to cancel the existing pipeline-gated auto-merge (HTTP ${http_status})"
   fi
   case "$http_status" in
     200 | 201)
