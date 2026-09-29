@@ -49,6 +49,8 @@ require_unsigned_integer "MAGISK_UPSTREAM_PIPELINE_IID" "$MAGISK_UPSTREAM_PIPELI
 
 readonly merge_attempts=6
 readonly merge_delay=2
+readonly read_attempts=6
+readonly read_delay=2
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -56,12 +58,95 @@ trap 'rm -rf "$tmp_dir"' EXIT
 pipeline_auth_header=(--header "PRIVATE-TOKEN: ${MAGISK_CI_PIPELINE_CONTROL_TOKEN}")
 merge_auth_header=(--header "PRIVATE-TOKEN: ${MAGISK_CI_MR_AUTOMERGE_TOKEN}")
 
+# Invoked indirectly: api_get_with_retry receives this function's name
+# as its first argument, which shellcheck cannot follow.
+# shellcheck disable=SC2329 # Called by name from api_get_with_retry below.
 pipeline_api_curl() {
   curl --fail --silent --show-error --location "${pipeline_auth_header[@]}" "$@"
 }
 
 merge_api_curl() {
   curl --silent --show-error --location "${merge_auth_header[@]}" "$@"
+}
+
+# Curl exit codes that justify another try: DNS failure (6), connection
+# refused/reset (7), operation timeout (28), SSL/TLS handshake trouble (35,
+# 60), empty reply from the server (52) and send/receive failures (55, 56).
+# HTTP-layer failures (curl 22) are classified by status code instead.
+curl_exit_is_transient() {
+  case "$1" in
+    6 | 7 | 28 | 35 | 52 | 55 | 56 | 60) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+http_status_is_retryable() {
+  case "$1" in
+    408 | 429 | 5??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# api_get_with_retry <curl_fn> <output_file> [curl args...] <url>
+#
+# GET through one of the api_curl wrappers, retrying transient network
+# failures and HTTP 408/429/5xx with exponential backoff (read_delay doubling,
+# read_attempts attempts). Everything else — 404, 401/403, malformed requests
+# — fails immediately: retrying those only delays a deterministic error.
+# 2026-09-29, MiPush pipeline 2892824485: a single `curl: (35) Recv failure:
+# Connection reset by peer` on the merge-request read killed the controller
+# before it ever merged, and the serial loop then burned its full 120-poll
+# window while the merge request sat healthy and green.
+api_get_with_retry() {
+  local curl_fn="$1"
+  local output_file="$2"
+  shift 2
+  local url="${*: -1}"
+  local extra_args=("${@:1:$(($# - 1))}")
+
+  local attempt=1
+  local http_code
+  local curl_rc
+  local retryable
+  local delay="$read_delay"
+
+  while :; do
+    http_code="$("$curl_fn" --fail --silent --show-error \
+      --output "$output_file" \
+      --write-out '%{http_code}' \
+      "${extra_args[@]}" \
+      "$url")"
+    curl_rc=$?
+
+    if ((curl_rc == 0)); then
+      return 0
+    fi
+
+    retryable=0
+    if ((curl_rc == 22)) && http_status_is_retryable "$http_code"; then
+      retryable=1
+    elif ((curl_rc != 22)) && curl_exit_is_transient "$curl_rc"; then
+      retryable=1
+    fi
+
+    if ((retryable == 0)) || ((attempt >= read_attempts)); then
+      # Note: `${retryable:+...}` would be wrong here — `retryable=0` is
+      # non-null, so the suffix would print even for a first-attempt 404.
+      # The attempt count is the honest condition: "after N attempts" only
+      # makes sense once a retry actually happened.
+      local attempts_note=""
+      if ((attempt > 1)); then
+        attempts_note=" after ${attempt} attempts"
+      fi
+      echo "Error: GET ${url} failed (curl exit ${curl_rc}, HTTP ${http_code:-none}${attempts_note})" >&2
+      return 1
+    fi
+
+    echo "Transient failure reading ${url} (curl exit ${curl_rc}, HTTP ${http_code:-none}); retrying in ${delay}s (${attempt}/${read_attempts})." >&2
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
 }
 
 [[ "$MAGISK_UPSTREAM_PIPELINE_SOURCE" == "merge_request_event" ]] || fail "upstream pipeline is not a merge request pipeline"
@@ -80,8 +165,7 @@ expected_target_branch="$(trusted_target_branch "$upstream_project_path")" || \
 [[ "$upstream_project_id" == "$expected_upstream_project_id" ]] || fail "upstream project ID mismatch"
 
 pipeline_file="$tmp_dir/upstream-pipeline.json"
-if ! pipeline_api_curl \
-  --output "$pipeline_file" \
+if ! api_get_with_retry pipeline_api_curl "$pipeline_file" \
   "${CI_API_V4_URL}/projects/${upstream_project_id}/pipelines/${upstream_pipeline_id}"; then
   fail "failed to read upstream pipeline ${upstream_pipeline_id}"
 fi
@@ -105,11 +189,9 @@ mr_api_url="${CI_API_V4_URL}/projects/${upstream_project_id}/merge_requests/${me
 mr_file="$tmp_dir/merge-request.json"
 
 fetch_merge_request() {
-  if ! merge_api_curl \
-    --fail \
+  if ! api_get_with_retry merge_api_curl "$mr_file" \
     --get \
     --data-urlencode "with_merge_status_recheck=true" \
-    --output "$mr_file" \
     "$mr_api_url"; then
     fail "failed to read merge request !${merge_request_iid}"
   fi

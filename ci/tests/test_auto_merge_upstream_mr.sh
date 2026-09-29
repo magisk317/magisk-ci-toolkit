@@ -63,12 +63,49 @@ done
   exit 64
 }
 
+# maybe_fail_get <count-file> <failures-spec>: emulates curl for a GET whose
+# per-attempt behaviour is scripted, then never returns. Each spec entry is
+# `ok` (serve the real response), `curl:<exit>` (network-level failure: no
+# body, curl prints 000 for %{http_code}) or an HTTP status (curl --fail exits
+# 22 and prints the status). The last entry repeats once exceeded.
+maybe_fail_get() {
+  local count_file="$1"
+  local failures="$2"
+  local count index behavior
+  local -a behaviors=()
+
+  count="$(cat "$count_file")"
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$count_file"
+  IFS=',' read -r -a behaviors <<<"$failures"
+  index=$((count - 1))
+  if ((index >= ${#behaviors[@]})); then
+    index=$((${#behaviors[@]} - 1))
+  fi
+  behavior="${behaviors[$index]}"
+  case "$behavior" in
+    ok)
+      return 0
+      ;;
+    curl:*)
+      if [[ "$write_out" == "%{http_code}" ]]; then printf '000'; fi
+      echo "curl: (${behavior#curl:}) simulated connection failure" >&2
+      exit "${behavior#curl:}"
+      ;;
+    *)
+      if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' "$behavior"; fi
+      exit 22
+      ;;
+  esac
+}
+
 if [[ "$url" == */api/graphql ]]; then
   echo "unexpected GraphQL request" >&2
   exit 64
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines/[0-9]+$ ]]; then
+  maybe_fail_get "$MOCK_PIPELINE_GET_COUNT_FILE" "${MOCK_PIPELINE_GET_FAILURES:-ok}"
   jq '. + {created_at: (.created_at // "2026-01-01T00:00:00.200Z")}' "$MOCK_PIPELINE_FILE" >"$output_file"
   exit 0
 fi
@@ -79,6 +116,7 @@ if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/pipelines$ ]]; then
 fi
 
 if [[ "$method" == "GET" && "$url" =~ /projects/[0-9]+/merge_requests/[0-9]+$ ]]; then
+  maybe_fail_get "$MOCK_MR_GET_COUNT_FILE" "${MOCK_MR_GET_FAILURES:-ok}"
   cp "$MOCK_MR_FILE" "$output_file"
   exit 0
 fi
@@ -143,6 +181,8 @@ start_case() {
   mkdir -p "$case_dir"
   printf '0\n' >"$case_dir/merge-count"
   printf '0\n' >"$case_dir/cancel-auto-merge-count"
+  printf '0\n' >"$case_dir/mr-get-count"
+  printf '0\n' >"$case_dir/pipeline-get-count"
   : >"$case_dir/sleep.log"
   printf '%s\n' "{
     \"data\": {\"project\": {\"pipeline\": {
@@ -169,6 +209,10 @@ run_controller() {
     MOCK_MR_FILE="$case_dir/mr.json" \
     MOCK_MERGE_COUNT_FILE="$case_dir/merge-count" \
     MOCK_CANCEL_AUTO_MERGE_COUNT_FILE="$case_dir/cancel-auto-merge-count" \
+    MOCK_MR_GET_COUNT_FILE="$case_dir/mr-get-count" \
+    MOCK_PIPELINE_GET_COUNT_FILE="$case_dir/pipeline-get-count" \
+    MOCK_MR_GET_FAILURES="${MOCK_MR_GET_FAILURES:-ok}" \
+    MOCK_PIPELINE_GET_FAILURES="${MOCK_PIPELINE_GET_FAILURES:-ok}" \
     MOCK_SLEEP_LOG="$case_dir/sleep.log" \
     MOCK_CANCEL_AUTO_MERGE_STATUS="${MOCK_CANCEL_AUTO_MERGE_STATUS:-200}" \
     MOCK_MERGE_STATUSES="${MOCK_MERGE_STATUSES:-200}" \
@@ -316,5 +360,49 @@ run_controller
 assert_success
 assert_merge_count 0
 grep -F "has conflicts; automatic merge is skipped" "$case_dir/output.log" >/dev/null
+
+start_case "mr-read-retries-transient-network-failure"
+MOCK_MR_GET_FAILURES="curl:35,ok" run_controller
+assert_success
+assert_merge_count 1
+grep -F "Transient failure reading" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 35, HTTP 000)" "$case_dir/output.log" >/dev/null
+grep -F "retrying in 2s (1/6)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+grep -F "immediately without waiting for pipeline success" "$case_dir/output.log" >/dev/null
+
+start_case "mr-read-retries-transient-http-503"
+MOCK_MR_GET_FAILURES="503,ok" run_controller
+assert_success
+assert_merge_count 1
+grep -F "(curl exit 22, HTTP 503)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "upstream-pipeline-read-retries-transient-503"
+MOCK_PIPELINE_GET_FAILURES="503,ok" run_controller
+assert_success
+assert_merge_count 1
+grep -F "pipelines/200" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 22, HTTP 503)" "$case_dir/output.log" >/dev/null
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "mr-read-404-is-fatal-without-retry"
+MOCK_MR_GET_FAILURES="404" run_controller
+assert_failure
+assert_merge_count 0
+grep -F "failed to read merge request !20" "$case_dir/output.log" >/dev/null
+grep -F "(curl exit 22, HTTP 404)" "$case_dir/output.log" >/dev/null
+[[ ! -s "$case_dir/sleep.log" ]] || {
+  echo "Expected no retries for HTTP 404" >&2
+  exit 1
+}
+
+start_case "mr-read-persistent-transient-is-bounded"
+MOCK_MR_GET_FAILURES="curl:35" run_controller
+assert_failure
+assert_merge_count 0
+printf '2\n4\n8\n16\n32\n' | diff -u - "$case_dir/sleep.log"
+grep -F "failed to read merge request !20" "$case_dir/output.log" >/dev/null
+grep -F "after 6 attempts" "$case_dir/output.log" >/dev/null
 
 echo "auto_merge_upstream_mr tests passed"
