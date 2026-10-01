@@ -243,6 +243,44 @@ create_signed_tag() {
 }
 
 # Core release tag logic — call this from your repo's wrapper script
+check_changelog_entry_boundary() {
+  local root_dir="$1"
+  local tag_name="$2"
+  local changelog_file="${MAGISK_CHANGELOG_FILE:-${root_dir}/docs/CHANGELOG.md}"
+
+  if [[ ! -f "$changelog_file" ]]; then
+    echo "ERROR: changelog not found: $changelog_file" >&2
+    exit 1
+  fi
+
+  local changelog_extract
+  changelog_extract="$(mktemp)"
+  if ! awk -v version="$tag_name" '
+    $0 == "---" && found { exit }
+    found { print; next }
+    index($0, "## [" version "]") == 1 { found = 1; print; next }
+    END { if (!found) exit 1 }
+  ' "$changelog_file" > "$changelog_extract"; then
+    rm -f "$changelog_extract"
+    echo "ERROR: no changelog entry for $tag_name in $changelog_file" >&2
+    exit 1
+  fi
+
+  # A missing "---" separator makes the extract run into the next entry, which
+  # is how an older release log ends up inside the current release notes.
+  local heading_count
+  heading_count="$(grep -c '^## \[' "$changelog_extract" || true)"
+  if [[ "${heading_count:-0}" -gt 1 ]]; then
+    echo "ERROR: the $tag_name entry in $changelog_file is not closed by a '---' separator." >&2
+    echo "       The notes would also carry $((heading_count - 1)) older entry/entries:" >&2
+    grep -n '^## \[' "$changelog_extract" | sed 's/^/       /' >&2
+    rm -f "$changelog_extract"
+    exit 1
+  fi
+  rm -f "$changelog_extract"
+  echo "Changelog entry for $tag_name is bounded by a '---' separator."
+}
+
 release_tag() {
   local root_dir="${1:-.}"
   local version_file="${root_dir}/gradle/libs.versions.toml"
@@ -277,6 +315,9 @@ release_tag() {
       echo "WARN: release guard script not found: $guard_script"
     fi
   fi
+
+  # Fail fast: an unbounded changelog entry silently leaks older release logs.
+  check_changelog_entry_boundary "$root_dir" "$tag_name"
 
   # Run pre-push checks (override this function in your wrapper)
   if type run_pre_push_checks >/dev/null 2>&1; then

@@ -129,12 +129,26 @@ cat >> "$output_file" <<'EOF'
 
 EOF
 
-awk -v version="$release_name" '
+if ! awk -v version="$release_name" '
   $0 == "---" && found { exit }
   found { print; next }
   index($0, "## [" version "]") == 1 { found = 1; print; next }
   END { if (!found) exit 1 }
-' "$changelog_file" > "$changelog_extract"
+' "$changelog_file" > "$changelog_extract"; then
+  echo "ERROR: no changelog entry for $release_name in $changelog_file" >&2
+  exit 1
+fi
+
+# Without a trailing "---" the extract keeps going and the notes end up
+# carrying every older release entry, so refuse to build them.
+heading_count="$(grep -c '^## \[' "$changelog_extract" || true)"
+if [[ "${heading_count:-0}" -gt 1 ]]; then
+  echo "ERROR: the $release_name entry in $changelog_file is not closed by a '---' separator." >&2
+  echo "       The release notes would also carry $((heading_count - 1)) older entry/entries:" >&2
+  grep -n '^## \[' "$changelog_extract" | sed 's/^/       /' >&2
+  echo "       Add the separator after the entry (before the next '## [vX.Y.Z]' heading)." >&2
+  exit 1
+fi
 
 generated_notes=""
 if [[ "$generate_github_notes" == "true" && -n "$source_repo" ]] && command -v gh >/dev/null 2>&1; then
