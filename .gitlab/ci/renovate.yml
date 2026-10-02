@@ -7,7 +7,7 @@
   # A serial orchestrator must survive the beta push produced by its own
   # merge. The protected Renovate controller cancels obsolete orchestrators.
   interruptible: false
-  image: "renovate/renovate:44.131.0"
+  image: "renovate/renovate:44.132.2"
   stage: maintenance
   needs: []
   variables:
