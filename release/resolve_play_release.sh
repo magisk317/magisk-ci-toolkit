@@ -222,6 +222,15 @@ skip_statuses="${MAGISK_PLAY_SKIP_STATUSES:-IN_REVIEW APPROVED_NOT_PUBLISHED}"
 play_skip_release=0
 if [[ -n "$track_status" && " $skip_statuses " == *" $track_status "* ]]; then
   play_skip_release=1
+elif [[ "$play_query_status" != success ]]; then
+  # Fail closed: an unresolved track status (Play API unreachable, service
+  # account rejected, transient empty bodies exhausted) must never fall
+  # through to a blind upload. A skipped publish is recoverable by re-running
+  # the job; publishing during an API outage is not -- it can duplicate
+  # submissions or resurrect a stale versionCode.
+  track_status="PLAY_QUERY_FAILED"
+  play_skip_release=1
+  echo "ERROR: Play track status could not be resolved for $package_name track $track (query=${play_query_status}); refusing to publish (fail-closed)." >&2
 fi
 
 mkdir -p "$(dirname "$output_file")"

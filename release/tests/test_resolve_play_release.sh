@@ -68,3 +68,32 @@ if grep -Fq '[[ "$track" == beta' "$resolver"; then
 fi
 
 echo 'PASS: Play release gate contract'
+
+# Fail-closed contract: when the track status cannot be resolved (Play API
+# unreachable / credentials rejected), the resolver must order the publish
+# step to skip instead of uploading blind.
+openssl genrsa -out "$tmp_dir/key.pem" 2048 2>/dev/null
+python3 - "$tmp_dir/key.pem" > "$tmp_dir/creds.json" <<'PY'
+import json, sys
+print(json.dumps({
+    "private_key": open(sys.argv[1], encoding="utf-8").read(),
+    "client_email": "resolver-test@example.com",
+}))
+PY
+mkdir -p "$tmp_dir/bin"
+printf '#!/bin/sh\nexit 7\n' > "$tmp_dir/bin/curl"
+chmod +x "$tmp_dir/bin/curl"
+if ! (cd "$tmp_dir/repo" && PATH="$tmp_dir/bin:$PATH" \
+  ANDROID_PUBLISHER_CREDENTIALS="$(cat "$tmp_dir/creds.json")" \
+  MAGISK_PLAY_TRACK_OVERRIDE=beta CI_PIPELINE_IID=175 \
+  bash "$resolver" --package-name example.app \
+    --version-file "$tmp_dir/libs.versions.toml" --output "$tmp_dir/out" \
+    --initial-version-code 1569 >/dev/null 2>&1); then
+  echo 'FAIL: resolver must exit 0 when the track query fails' >&2
+  exit 1
+fi
+grep -Fq 'MAGISK_PLAY_SKIP_RELEASE=1' "$tmp_dir/out" || { echo 'FAIL: track query failure must set MAGISK_PLAY_SKIP_RELEASE=1 (fail-closed)' >&2; exit 1; }
+grep -Fq 'MAGISK_PLAY_TRACK_STATUS=PLAY_QUERY_FAILED' "$tmp_dir/out" || { echo 'FAIL: track query failure must report PLAY_QUERY_FAILED' >&2; exit 1; }
+grep -Fq 'MAGISK_PLAY_QUERY_STATUS=unavailable' "$tmp_dir/out" || { echo 'FAIL: track query failure must keep MAGISK_PLAY_QUERY_STATUS=unavailable' >&2; exit 1; }
+
+echo 'PASS: Play release fail-closed contract'

@@ -71,7 +71,12 @@ esac
 # states), skip the upload instead of piling up submissions and pressuring
 # Play review. Effective on every track, including production.
 if [[ "${MAGISK_PLAY_SKIP_RELEASE:-0}" == "1" ]]; then
-  echo "INFO: Play track '${MAGISK_PLAY_TRACK}' latest release not live yet (state='${MAGISK_PLAY_TRACK_STATUS:-unknown}'); skipping publish to avoid review pile-up." >&2
+  skip_reason="${MAGISK_PLAY_TRACK_STATUS:-unknown}"
+  if [[ "$skip_reason" == "PLAY_QUERY_FAILED" ]]; then
+    echo "ERROR: Play track status query failed for track '${MAGISK_PLAY_TRACK}'; refusing to publish (fail-closed). Restore Play API access and re-run this job." >&2
+  else
+    echo "INFO: Play track '${MAGISK_PLAY_TRACK}' latest release not live yet (state='${skip_reason}'); skipping publish to avoid review pile-up." >&2
+  fi
   {
     printf 'MAGISK_RELEASE_TRACK=%q\n' "$MAGISK_PLAY_TRACK"
     printf 'MAGISK_RELEASE_VERSION_NAME=%q\n' "$MAGISK_PLAY_VERSION_NAME"
