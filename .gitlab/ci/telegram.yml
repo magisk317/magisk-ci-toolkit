@@ -20,6 +20,13 @@
 #   MAGISK_TELEGRAM_VERSION_NAME  override auto-detected app versionName
 #   TG_BOT_TOKEN / TG_CHAT_ID  required
 #   TG_CI_THREAD_ID / TG_THREAD_ID  optional forum topics
+#   MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT     relay a pointer for each delivered
+#                                          drop into this legacy room (empty
+#                                          = disabled; requires the state
+#                                          file written by the ci template)
+#   MAGISK_TELEGRAM_LEGACY_NOTICE_THREAD   optional forum topic in that room
+#   MAGISK_TELEGRAM_LEGACY_NOTICE_TZ       notice timestamp zone (default
+#                                          Asia/Shanghai)
 
 .magisk_telegram_ci:
   image: "alpine:3.22"
@@ -104,11 +111,18 @@
           bash "$tmp/toolkit/ci/otel_export.sh" "ci.telegram" "magisk.span_source=telegram_after_script"
         fi
       fi
-      # Consumer hook: relay the delivered message coordinates (see the state
-      # file written at the end of the ci script). Failure is non-fatal.
-      if [ -f "${CI_PROJECT_DIR:-}/.telegram_ci_state" ] && [ -f "${CI_PROJECT_DIR:-}/scripts/telegram_ci_hook.sh" ]; then
-        bash "${CI_PROJECT_DIR}/scripts/telegram_ci_hook.sh" \
-          || echo "telegram_ci_hook.sh failed; ignoring" >&2
+      # Legacy-room relay: with MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT set, the
+      # toolkit hook posts a pointer to the delivered drop into that room; a
+      # consumer-owned scripts/telegram_ci_hook.sh remains supported as the
+      # fully custom variant. Both are best-effort and non-fatal.
+      if [ -f "${CI_PROJECT_DIR:-}/.telegram_ci_state" ]; then
+        if [ -n "${MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT:-}" ] && [ -x "$tmp/toolkit/ci/telegram_legacy_notice.sh" ]; then
+          bash "$tmp/toolkit/ci/telegram_legacy_notice.sh" \
+            || echo "telegram legacy notice failed; ignoring" >&2
+        elif [ -f "${CI_PROJECT_DIR:-}/scripts/telegram_ci_hook.sh" ]; then
+          bash "${CI_PROJECT_DIR}/scripts/telegram_ci_hook.sh" \
+            || echo "telegram_ci_hook.sh failed; ignoring" >&2
+        fi
       fi
 
   script:
