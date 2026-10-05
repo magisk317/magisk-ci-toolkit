@@ -104,6 +104,12 @@
           bash "$tmp/toolkit/ci/otel_export.sh" "ci.telegram" "magisk.span_source=telegram_after_script"
         fi
       fi
+      # Consumer hook: relay the delivered message coordinates (see the state
+      # file written at the end of the ci script). Failure is non-fatal.
+      if [ -f "${CI_PROJECT_DIR:-}/.telegram_ci_state" ] && [ -f "${CI_PROJECT_DIR:-}/scripts/telegram_ci_hook.sh" ]; then
+        bash "${CI_PROJECT_DIR}/scripts/telegram_ci_hook.sh" \
+          || echo "telegram_ci_hook.sh failed; ignoring" >&2
+      fi
 
   script:
     - |
@@ -561,6 +567,14 @@
 
       send_documents_group "$ci_thread" "$ci_msg" "${ci_artifacts[@]}"
       telegram_pin_latest "$ci_thread" ci
+
+      # Persist the delivered message coordinates for consumer hooks: an
+      # after_script hook script (scripts/telegram_ci_hook.sh) can relay a
+      # pointer into a legacy room. Absent ids (skip paths) write nothing.
+      if [ -n "${TELEGRAM_LAST_MESSAGE_IDS:-}" ]; then
+        printf 'ids=%s\nchat=%s\n' "$TELEGRAM_LAST_MESSAGE_IDS" "${TG_CHAT_ID:-}" \
+          > "${CI_PROJECT_DIR:-.}/.telegram_ci_state"
+      fi
 
       MAGISK_TELEGRAM_CI_EOF
       bash /tmp/magisk_telegram_ci.sh
