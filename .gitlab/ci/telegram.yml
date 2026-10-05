@@ -1377,6 +1377,15 @@
           bash "$tmp/toolkit/ci/otel_export.sh" "ci.telegram" "magisk.span_source=telegram_images_after_script"
         fi
       fi
+      # Legacy-room relay (same contract as .magisk_telegram_ci): consumers
+      # set MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT to announce each drop in a
+      # legacy room; absent variable or state file keeps this a no-op.
+      if [ -f "${CI_PROJECT_DIR:-}/.telegram_ci_state" ]; then
+        if [ -n "${MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT:-}" ] && [ -x "$tmp/toolkit/ci/telegram_legacy_notice.sh" ]; then
+          bash "$tmp/toolkit/ci/telegram_legacy_notice.sh" \
+            || echo "telegram legacy notice failed; ignoring" >&2
+        fi
+      fi
   script:
     - |
       set -euo pipefail

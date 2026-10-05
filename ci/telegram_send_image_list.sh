@@ -384,4 +384,10 @@ if ! resp="$(curl "${curl_args[@]}")"; then
   exit 1
 fi
 telegram_capture_message_ids "$resp"
+# Persist the delivered coordinates for the after_script legacy-room hook
+# (same contract as .magisk_telegram_ci).
+if [ -n "${TELEGRAM_LAST_MESSAGE_IDS:-}" ]; then
+  printf 'ids=%s\nchat=%s\n' "$TELEGRAM_LAST_MESSAGE_IDS" "${TG_CHAT_ID:-}" \
+    > "${CI_PROJECT_DIR:-.}/.telegram_ci_state"
+fi
 telegram_pin_latest "$thread" images
