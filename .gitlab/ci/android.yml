@@ -4,13 +4,31 @@
 # and define concrete jobs with `extends`.
 
 .magisk_android_base:
-  # Ubuntu 26.04 (glibc 2.43). The runners mount host-built ARM aidl/aapt2
-  # binaries that require GLIBC_2.38, so the image needs a glibc at least
-  # that new; no published JDK 27 image qualifies (temurin ships no 27 image
-  # at all, Corretto 27 is AL2023 glibc 2.34 or Alpine musl, and Liberica 27
-  # is Debian bookworm glibc 2.36). javac 27 itself comes from an Adoptium GA
-  # tarball staged by the before_script into the persistent SDK mount, so
-  # each runner downloads it only once.
+  # Java runtime policy -- see "CI Java Runtime" in AGENTS.md before touching
+  # either the image or the JDK staging block in before_script.
+  #
+  # Two supported configurations:
+  #   A. published JDK image (preferred when one exists for the target major):
+  #        image: "eclipse-temurin:<major>-jdk"
+  #      eclipse-temurin:27-jdk is based on ubuntu:26.04 and publishes
+  #      linux/amd64 + linux/arm64/v8, so it meets the glibc floor below.
+  #      The image owns JAVA_HOME (/opt/java/openjdk); delete the JDK staging
+  #      block from before_script and do not export JAVA_HOME over it.
+  #   B. Ubuntu base + Adoptium tarball (current, fallback when no image
+  #      qualifies): javac <major> is staged by before_script into
+  #      $ANDROID_HOME/jdk-<major> from
+  #        https://api.adoptium.net/v3/binary/latest/<major>/ga/linux/{x64|aarch64}/jdk/hotspot/normal/eclipse
+  #      guarded by $ANDROID_HOME/.jdk.lock, so each runner downloads it once.
+  #
+  # Constraints that decide A vs B, whichever is active:
+  #   - glibc >= 2.38: Ubuntu 26.04 (glibc 2.43) here because the runners mount
+  #     host-built ARM aidl/aapt2 binaries needing GLIBC_2.38. This ruled out
+  #     Corretto 27 (AL2023 glibc 2.34 / Alpine musl) and Liberica 27 (bookworm
+  #     2.36) when 27 first shipped.
+  #   - linux/arm64/v8 must exist for the tag: the arm64 runner is rootless on
+  #     Oracle ARM, and a missing manifest fails as runner_configuration_error
+  #     before any code runs.
+  #   - Temurin tag numbering: "27-jdk" is major 27, a bare "27" is 11.0.27.
   image: "ubuntu:26.04"
   resource_group: ${MAGISK_GRADLE_RESOURCE_GROUP:-android-gradle-build}
   variables:
