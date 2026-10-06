@@ -2,7 +2,7 @@
 # pushes, bundle refreshers, notification bridges, one-off shell chores).
 #
 # Ecosystem image strategy — every job has exactly one image source:
-#   Android Gradle jobs  -> .magisk_android_base (ubuntu:26.04 + staged JDK 27)
+#   Android Gradle jobs  -> .magisk_android_base (eclipse-temurin JDK image)
 #   utility jobs         -> this anchor (alpine, pinned)
 #   language-tool jobs   -> their own pinned tool image (golang/bun/node/docker/
 #                           rust), a registered exception, not unified here
