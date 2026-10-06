@@ -8,17 +8,19 @@
   # either the image or the JDK staging block in before_script.
   #
   # Two supported configurations:
-  #   A. published JDK image (preferred when one exists for the target major):
-  #        image: "eclipse-temurin:<major>-jdk"
-  #      eclipse-temurin:27-jdk is based on ubuntu:26.04 and publishes
-  #      linux/amd64 + linux/arm64/v8, so it meets the glibc floor below.
-  #      The image owns JAVA_HOME (/opt/java/openjdk); delete the JDK staging
-  #      block from before_script and do not export JAVA_HOME over it.
-  #   B. Ubuntu base + Adoptium tarball (current, fallback when no image
-  #      qualifies): javac <major> is staged by before_script into
-  #      $ANDROID_HOME/jdk-<major> from
+  #   A. published JDK image (ACTIVE since 2026-10-07):
+  #        image: "eclipse-temurin:<major>_<build>-jdk-resolute"
+  #      "-resolute" pins the OS base to Ubuntu 26.04 so a future Adoptium
+  #      default-base change cannot silently move the glibc floor, and the
+  #      "_<build>" segment pins the JDK so the two runners cannot drift
+  #      (they pull if-not-present, so a rolling tag would silently keep the
+  #      first digest each host ever saw). The image owns JAVA_HOME
+  #      (/opt/java/openjdk); do not export JAVA_HOME over it.
+  #   B. Ubuntu base + Adoptium tarball (used 2026-09-26 .. 2026-10-07, keep as
+  #      the fallback when no image qualifies): javac <major> is staged by
+  #      before_script into $ANDROID_HOME/jdk-<major> from
   #        https://api.adoptium.net/v3/binary/latest/<major>/ga/linux/{x64|aarch64}/jdk/hotspot/normal/eclipse
-  #      guarded by $ANDROID_HOME/.jdk.lock, so each runner downloads it once.
+  #      guarded by $ANDROID_HOME/.jdk.lock. Full recipe in AGENTS.md.
   #
   # Constraints that decide A vs B, whichever is active:
   #   - glibc >= 2.38: Ubuntu 26.04 (glibc 2.43) here because the runners mount
@@ -29,7 +31,7 @@
   #     Oracle ARM, and a missing manifest fails as runner_configuration_error
   #     before any code runs.
   #   - Temurin tag numbering: "27-jdk" is major 27, a bare "27" is 11.0.27.
-  image: "ubuntu:26.04"
+  image: "eclipse-temurin:27_35-jdk-resolute"
   resource_group: ${MAGISK_GRADLE_RESOURCE_GROUP:-android-gradle-build}
   variables:
     GET_SOURCES_ATTEMPTS: "3"
@@ -107,34 +109,10 @@
       rm -rf /var/lib/apt/lists/*
 
       mkdir -p "$ANDROID_HOME"
-      # Ubuntu 24.04 has no JDK 27 package and no published 27 image meets the
-      # glibc floor (see the image comment above), so stage an Adoptium GA
-      # tarball into the persistent SDK mount: each runner downloads it once,
-      # guarded by a lock that mirrors the SDK bootstrap below.
-      magisk_jdk_dir="$ANDROID_HOME/jdk-27"
-      if [ ! -x "$magisk_jdk_dir/bin/javac" ]; then
-        exec 9>"$ANDROID_HOME/.jdk.lock" 2>/dev/null || true
-        flock 9 2>/dev/null || true
-        if [ ! -x "$magisk_jdk_dir/bin/javac" ]; then
-          magisk_dpkg_arch="$(dpkg --print-architecture)"
-          case "$magisk_dpkg_arch" in
-            amd64) magisk_jdk_arch=x64 ;;
-            arm64) magisk_jdk_arch=aarch64 ;;
-            *) echo "Unsupported runner architecture: $magisk_dpkg_arch" >&2; exit 1 ;;
-          esac
-          magisk_jdk_tmp="$(mktemp -d)"
-          curl -fsSL --retry 2 \
-            "https://api.adoptium.net/v3/binary/latest/27/ga/linux/${magisk_jdk_arch}/jdk/hotspot/normal/eclipse" \
-            -o "$magisk_jdk_tmp/jdk.tar.gz"
-          rm -rf "$magisk_jdk_dir"
-          mkdir -p "$magisk_jdk_dir"
-          tar -xzf "$magisk_jdk_tmp/jdk.tar.gz" -C "$magisk_jdk_dir" --strip-components=1
-          rm -rf "$magisk_jdk_tmp"
-        fi
-        flock -u 9 2>/dev/null || true
-      fi
-      export JAVA_HOME="$magisk_jdk_dir"
-      export PATH="$JAVA_HOME/bin:$PATH"
+      # The JDK comes from the image (see the image comment above): it exports
+      # JAVA_HOME=/opt/java/openjdk and puts java/javac/jlink/jpackage on PATH.
+      # Restage it locally only if a future major ships ahead of its image --
+      # AGENTS.md "CI Java Runtime" has the Adoptium tarball recipe.
       java -version
 
       android_cli="$ANDROID_HOME/cmdline-tools/latest/bin/android"

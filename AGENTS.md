@@ -54,22 +54,36 @@ consumers must never restate JDK setup in their own `.gitlab-ci.yml`.
 - **Eclipse Temurin tag numbering.** `27-jdk` is Java major 27, but a bare `27` tag resolves
   to 11.0.27. Always spell the `-jdk` (or `-jre`) suffix.
 
-**A. Published JDK image -- preferred whenever it exists for the target major**
+**A. Published JDK image -- ACTIVE since 2026-10-07**
 
 ```yaml
-image: "eclipse-temurin:<major>-jdk"
+image: "eclipse-temurin:<major>_<build>-jdk-resolute"   # e.g. 27_35-jdk-resolute
 ```
+
+Spell both optional segments:
+
+- `-resolute` pins the OS base to Ubuntu 26.04. The bare `27-jdk` tag points at whatever
+  base Adoptium currently defaults to, so a future default change would silently move the
+  glibc floor underneath the aidl/aapt2 assumption. (`27-jdk`, `27_35-jdk`,
+  `27-jdk-resolute` and `27_35-jdk-resolute` currently resolve to the same amd64 manifest;
+  only the index digests differ by attestation entries.)
+- `<major>_<build>` pins the JDK build (`27_35` = Temurin 27+35). The runners pull with
+  `if-not-present`, so a rolling tag like `27-jdk-resolute` would keep whatever digest each
+  host first cached -- no patch updates would ever arrive, and lzc (amd64) and the Oracle
+  arm64 runner could silently disagree. Changing the tag text is what forces a new pull.
+- Bonus: the image's base is the very same `ubuntu:26.04` manifest digest
+  (`sha256:88a381d5...`) this job used to pull directly, so the base layer is already
+  cached on both runners and only the ~113MB JDK layer is new.
 
 The image supplies its own `JAVA_HOME` (`/opt/java/openjdk`) and `PATH`. Delete the JDK
 staging block from `before_script` and do **not** export `JAVA_HOME` on top of it.
-`eclipse-temurin:27-jdk` is based on `ubuntu:26.04` and publishes `linux/amd64` +
-`linux/arm64/v8`, so it satisfies both constraints above. Docker-tag bumps are already
-handled by Renovate in this repository (`rust:*`, `renovate/renovate:*`), so pinning the JDK
-to an image turns Java upgrades into an automatic PR.
+`javac`, `jlink`, `jpackage`, `jmod` and `jshell` are all present; `git`, `curl`, `unzip`,
+`python3` and `ripgrep` are not, so the apt install block stays.
+
 
 **B. Ubuntu base + Adoptium tarball -- fallback when no image qualifies**
 
-Used from 2026-09-26 (commit `b6dc220`) until a 27 image existed. It is the recipe to restore
+Used from 2026-09-26 (commit `b6dc220`) until a 27 image existed (retired 2026-10-07). It is the recipe to restore
 the next time a major ships before its image does:
 
 ```yaml
@@ -113,10 +127,11 @@ so patch updates never arrive and two runners can disagree. Prefer A whenever po
 2. Grep the whole tree for `jdk-27`, `JAVA_HOME`, and `XINYI_JDK_DIR` -- hardcoded paths live
    in consumers (xinyi's `scripts/ci/gitlab_stage_jdk27.sh` and `.xinyi_desktop_kmp_linux`
    restate the same fetch for the pure-JVM desktop track) and in packaging drivers.
-3. Consumers pick up the change differently: xinyi includes this project by `ref: v1`
-   (re-point the tag), XposedSmsCode and MiPushFramework use the `.magisk-ci-toolkit`
-   submodule (bump the gitlink). The two are not synchronized, so expect a window where
-   projects disagree.
+3. All three consumers (XposedSmsCode, xinyi-relay, MiPushFramework) include this project
+   with `include: project: magisk3171/shared/magisk-ci-toolkit, ref: v1` -- there is **no**
+   `.magisk-ci-toolkit` submodule in any of them. Push to `main` and re-point the signed
+   `v1` tag, and every consumer picks it up on its next pipeline; no per-repo commit is
+   needed (and none should be made: the tag is the only pin).
 4. Validate with the full gate on every consumer -- `detekt` plus the branch's full test task
    set and `kover`, not `assemble` alone. The Gradle/Kotlin/AGP toolchain probe changes from
    "a JDK under `ANDROID_HOME`" to "the system JDK", which `assemble` does not exercise.
