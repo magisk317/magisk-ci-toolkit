@@ -88,8 +88,14 @@ bump_consumer() {
 
   # Init and update the specific submodule
   cd "$work_dir"
-  git config user.name "magisk317"
-  git config user.email "35032111-magisk731@users.noreply.gitlab.com"
+  # Same bot identity as the shared catalog sync in build-logic: the consumer
+  # repos' telegram:ci auto-notify rules match CI_COMMIT_AUTHOR against
+  # Renovate317@users.noreply, and the id prefix is what lets GitLab attribute
+  # the commit to the Renovate317 account. Keep both fields in step with
+  # build-logic/scripts/sync_and_push_consumers.sh - a human name here used to
+  # push bot work under the maintainer's identity.
+  git config user.name "Renovate"
+  git config user.email "40025304-Renovate317@users.noreply.gitlab.com"
 
   # Fetch the submodule at the target commit
   local submodule_url
