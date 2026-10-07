@@ -94,6 +94,12 @@ bump_consumer() {
   # the commit to the Renovate317 account. Keep both fields in step with
   # build-logic/scripts/sync_and_push_consumers.sh - a human name here used to
   # push bot work under the maintainer's identity.
+  #
+  # The MR is created with squash=true (above) so the merge lands as a single
+  # commit whose author is this bot identity. A non-squashed merge would create
+  # a merge commit authored by the merge actor instead, and CI_COMMIT_AUTHOR in
+  # the triggered pipeline would then miss the telegram:ci rule - the same
+  # silent-drop failure the catalog-sync bot identity was introduced to avoid.
   git config user.name "Renovate"
   git config user.email "40025304-Renovate317@users.noreply.gitlab.com"
 
@@ -147,6 +153,7 @@ bump_consumer() {
     --data-urlencode "target_branch=beta" \
     --data-urlencode "title=chore(deps): update submodule ${SUBMODULE_PATH} to ${SHORT_SHA}" \
     --data-urlencode "remove_source_branch=true" \
+    --data-urlencode "squash=true" \
     "${API_BASE}/projects/${consumer_id}/merge_requests" 2>/dev/null || true)"
 
   local mr_iid
