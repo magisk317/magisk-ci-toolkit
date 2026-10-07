@@ -83,7 +83,15 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf -- "$tmp_dir"' EXIT
 
 api_curl() {
-  curl --fail --silent --show-error --location "${auth_header[@]}" "$@"
+  # GitLab answers 503/429 while a rate-limit window is active: a single
+  # transient failure used to abort the whole Renovate run (October 2026).
+  # curl retries 5xx/429 and connection errors only, so 4xx semantics,
+  # including the already-merged replies, stay unchanged.
+  curl --fail --silent --show-error --location \
+    --retry "${MAGISK_RENOVATE_API_RETRIES:-3}" \
+    --retry-delay "${MAGISK_RENOVATE_API_RETRY_DELAY_SECONDS:-5}" \
+    --retry-connrefused \
+    "${auth_header[@]}" "$@"
 }
 
 refresh_target_checkout() {

@@ -150,6 +150,14 @@ while (($# > 0)); do
     --get | --fail | --silent | --show-error | --location)
       shift
       ;;
+    # Transient-error retry flags: the mock never fails transiently, so it
+    # only has to accept them (values discarded).
+    --retry | --retry-delay | --retry-max-time)
+      shift 2
+      ;;
+    --retry-connrefused)
+      shift
+      ;;
     http://* | https://*)
       url="$1"
       shift
@@ -469,5 +477,19 @@ if grep -F "unsupported state locked" "$tmp_root/locked-timeout/output.log" >/de
   echo "a locked request must not be reported as an unsupported state" >&2
   exit 1
 fi
+
+# api_curl must arm curl's transient-error retry. GitLab answers 503 while a
+# rate-limit window is active, and one such reply used to abort the whole run
+# (and with it the consumer sync in the next stage). curl performs the retries
+# itself and only for 5xx/429 plus connection errors, so the contract asserted
+# here is the flags - a mocked failure sequence would only test the mock.
+grep -F -- '--retry "' "$loop_script" >/dev/null || {
+  echo "api_curl must pass --retry to curl" >&2
+  exit 1
+}
+grep -F -- "--retry-connrefused" "$loop_script" >/dev/null || {
+  echo "api_curl must pass --retry-connrefused to curl" >&2
+  exit 1
+}
 
 echo "serial Renovate loop tests passed"
