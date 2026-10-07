@@ -130,7 +130,7 @@ bump_consumer() {
   git add "$SUBMODULE_PATH"
 
   # Commit
-  git commit -m "chore(submodule): bump ${SUBMODULE_PATH} to ${SHORT_SHA}" --quiet
+  git commit -m "chore(deps): update submodule ${SUBMODULE_PATH} to ${SHORT_SHA}" --quiet
 
   # Push branch
   git push --quiet origin HEAD:"refs/heads/${branch_name}" --force 2>/dev/null || {
@@ -145,7 +145,7 @@ bump_consumer() {
   mr_response="$(curl -sS --header "PRIVATE-TOKEN: $BUMP_TOKEN" \
     --data-urlencode "source_branch=${branch_name}" \
     --data-urlencode "target_branch=beta" \
-    --data-urlencode "title=chore(submodule): bump ${SUBMODULE_PATH} to ${SHORT_SHA}" \
+    --data-urlencode "title=chore(deps): update submodule ${SUBMODULE_PATH} to ${SHORT_SHA}" \
     --data-urlencode "remove_source_branch=true" \
     "${API_BASE}/projects/${consumer_id}/merge_requests" 2>/dev/null || true)"
 
