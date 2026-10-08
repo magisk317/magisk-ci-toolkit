@@ -19,6 +19,7 @@
 #   TG_MEDIA_CAPTION_POSITION  last|first (default last / footer)
 #   MAGISK_TELEGRAM_VERSION_NAME  override auto-detected app versionName
 #   TG_BOT_TOKEN / TG_CHAT_ID  required
+#   TG_RELEASE_CHAT_ID         optional release room override (defaults to TG_CHAT_ID)
 #   TG_CI_THREAD_ID / TG_THREAD_ID  optional forum topics
 #   MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT     relay a pointer for each delivered
 #                                          drop into this legacy room (empty
@@ -667,6 +668,7 @@
     - |
       cat > /tmp/magisk_telegram_release.sh <<'MAGISK_TELEGRAM_RELEASE_EOF'
       set -euo pipefail
+      TG_CHAT_ID="${TG_RELEASE_CHAT_ID:-${TG_CHAT_ID:-}}"
       if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
         echo "TG_BOT_TOKEN/TG_CHAT_ID not set, skip."
         exit 0
