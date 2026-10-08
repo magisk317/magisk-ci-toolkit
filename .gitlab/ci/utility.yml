@@ -17,6 +17,4 @@
 # file, ...) spells out its own before_script — a job-level before_script
 # REPLACES this one, so list the full set in that case.
 .magisk_utility_base:
-  image: "alpine:3.24"
-  before_script:
-    - apk add --no-cache bash ca-certificates curl git
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"

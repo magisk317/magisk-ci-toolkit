@@ -29,7 +29,7 @@
 #                                          Asia/Shanghai)
 
 .magisk_telegram_ci:
-  image: "alpine:3.22"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
   stage: notify
   variables:
     MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
@@ -46,13 +46,6 @@
       when: never
     - when: on_success
   before_script:
-    - apk add --no-cache bash coreutils curl findutils git
-    - |
-      if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
-        echo "Python interpreter already present; skip install."
-      else
-        apk add --no-cache python3
-      fi
     - |
       # The rolling pin reads capture_ids.py from the pinned toolkit checkout.
       ref="main"
@@ -593,7 +586,7 @@
       MAGISK_TELEGRAM_CI_EOF
       bash /tmp/magisk_telegram_ci.sh
 .magisk_telegram_release:
-  image: "alpine:3.22"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
   stage: release-publish
   variables:
     MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
@@ -609,13 +602,6 @@
     # Set to "false" to hide the GitHub link entirely.
     MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK: "true"
   before_script:
-    - apk add --no-cache bash coreutils curl findutils git
-    - |
-      if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
-        echo "Python interpreter already present; skip install."
-      else
-        apk add --no-cache python3
-      fi
     - |
       # The rolling pin reads capture_ids.py from the pinned toolkit checkout.
       ref="main"
@@ -1322,7 +1308,7 @@
       bash /tmp/magisk_telegram_release.sh
 
 .magisk_telegram_images:
-  image: "alpine:3.22"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
   stage: notify
   allow_failure: true
   variables:
@@ -1345,28 +1331,18 @@
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - when: on_success
-  before_script:
-    - apk add --no-cache bash coreutils curl git
-    - |
-      if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
-        echo "Python interpreter already present; skip install."
-      else
-        apk add --no-cache python3
-      fi
   after_script:
     - |
       set +e
-      apk add --no-cache bash curl python3 >/dev/null 2>&1 || true
       if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
         ref="$MAGISK_CI_TOOLKIT_REF"
       else
         ref="main"
       fi
       tmp="$(mktemp -d)"
-      if command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; then
-        git init --quiet "$tmp/toolkit"
-        git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
-        toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+      git init --quiet "$tmp/toolkit"
+      git -C "$tmp/toolkit" remote add origin "${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
+      toolkit_repository_auth="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
         if [ -n "${CI_JOB_TOKEN:-}" ] && [[ "$toolkit_repository_auth" == https://gitlab.com/* ]]; then
           toolkit_repository_auth="${toolkit_repository_auth/https:\/\//https:\/\/gitlab-ci-token:${CI_JOB_TOKEN}@}"
           git -C "$tmp/toolkit" remote set-url origin "$toolkit_repository_auth"

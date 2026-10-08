@@ -11,7 +11,7 @@
 # Project identity and commit/pipeline metadata come from GitLab predefined vars.
 
 .magisk_gitlab_qq_base:
-  image: "alpine:3.22"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
   stage: notify
   allow_failure: true
   variables:
@@ -23,7 +23,6 @@
     MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
     MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git"
   before_script:
-    - apk add --no-cache bash coreutils curl findutils git jq openssl
     - |
       set -euo pipefail
       : "${MAGISK_CI_TOOLKIT_REF:=main}"
