@@ -140,7 +140,13 @@ if [[ "${MAGISK_GRADLE_PROXY_DISABLE:-}" != "1" ]]; then
   derive_gradle_proxy_args
 fi
 if (( ${#gradle_proxy_args[@]} > 0 )); then
-  echo "Derived Gradle JVM proxy flags: ${gradle_proxy_args[*]}" >&2
+  # Runner/proxy topology (internal IPs, no_proxy lists) must not leak into
+  # public CI logs. Values are shown only when explicitly debugging.
+  if [[ "${MAGISK_CI_DEBUG:-}" == "1" ]]; then
+    echo "Derived Gradle JVM proxy flags: ${gradle_proxy_args[*]}" >&2
+  else
+    echo "Derived Gradle JVM proxy flags: ${#gradle_proxy_args[@]} flag(s) applied (values hidden; set MAGISK_CI_DEBUG=1 to show)" >&2
+  fi
   set -- "${gradle_proxy_args[@]}" "$@"
 fi
 
@@ -221,7 +227,10 @@ attempt=1
 while (( attempt <= GRADLE_RETRY_MAX_ATTEMPTS )); do
   log_file="$(mktemp)"
 
-  echo "Running Gradle attempt ${attempt}/${GRADLE_RETRY_MAX_ATTEMPTS}: ${GRADLEW_BIN} $*"
+  # Redact injected proxy -D values (internal proxy host/port and the
+  # nonProxyHosts topology list) from the echoed command; task list stays.
+  display_cmd="$(printf '%s ' "${GRADLEW_BIN}" "$@" | sed -E 's/(-D(https?|socks)[A-Za-z.]*(proxyHost|proxyPort|nonProxyHosts)=)[^ ]+/\1<hidden>/g')"
+  echo "Running Gradle attempt ${attempt}/${GRADLE_RETRY_MAX_ATTEMPTS}: ${display_cmd% }"
 
   set +e
   setsid "$GRADLEW_BIN" "$@" >"$log_file" 2>&1 &
