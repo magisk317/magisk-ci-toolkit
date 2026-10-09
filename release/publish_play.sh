@@ -348,3 +348,14 @@ if [[ -n "$release_env_file" ]]; then
     printf 'MAGISK_RELEASE_STATUS=published\n'
   } > "$release_env_file"
 fi
+
+# Best-effort sync release to mobile-apps-site backend (D1)
+if [[ -n "${MAGISK_ENTITLEMENT_SYNC_URL:-}" && -n "${MAGISK_ENTITLEMENT_SYNC_SECRET:-}" && -n "${MAGISK_ENTITLEMENT_APP_ID:-}" ]]; then
+  curl --silent --show-error --max-time 15 \
+    --request POST \
+    --header "Content-Type: application/json" \
+    --header "X-Release-Sync-Secret: ${MAGISK_ENTITLEMENT_SYNC_SECRET}" \
+    --data "{\"app_id\":\"${MAGISK_ENTITLEMENT_APP_ID}\",\"channel\":\"play\",\"version_code\":${MAGISK_PLAY_VERSION_CODE},\"version_name\":\"${MAGISK_PLAY_VERSION_NAME}\",\"track_status\":\"production\"}" \
+    "${MAGISK_ENTITLEMENT_SYNC_URL}/admin/releases/sync" -w '\n[release-sync] HTTP %{http_code}\n' -o /dev/null || echo '[release-sync] request failed (non-fatal)'
+fi
+

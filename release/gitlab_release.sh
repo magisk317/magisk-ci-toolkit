@@ -288,3 +288,21 @@ PY
 fi
 
 echo "Published GitLab release: $tag_name"
+
+# Best-effort sync release to mobile-apps-site backend (D1)
+if [[ -n "${MAGISK_ENTITLEMENT_SYNC_URL:-}" && -n "${MAGISK_ENTITLEMENT_SYNC_SECRET:-}" ]]; then
+  app_id="${MAGISK_ENTITLEMENT_APP_ID:-}"
+  version_code="${MAGISK_RELEASE_VERSION_CODE:-}"
+  version_name="${MAGISK_RELEASE_VERSION_NAME:-$tag_name}"
+  if [[ -z "$version_code" && -f "play-release.env" ]]; then
+    version_code="$(grep '^MAGISK_PLAY_VERSION_CODE=' play-release.env | cut -d= -f2 | tr -d "'\"" || true)"
+  fi
+  if [[ -n "$app_id" && -n "$version_code" ]]; then
+    curl --silent --show-error --max-time 15 \
+      --request POST \
+      --header "Content-Type: application/json" \
+      --header "X-Release-Sync-Secret: ${MAGISK_ENTITLEMENT_SYNC_SECRET}" \
+      --data "{\"app_id\":\"${app_id}\",\"channel\":\"sideload\",\"version_code\":${version_code},\"version_name\":\"${version_name}\",\"min_supported_version_code\":${version_code}}" \
+      "${MAGISK_ENTITLEMENT_SYNC_URL}/admin/releases/sync" -w '\n[release-sync] HTTP %{http_code}\n' -o /dev/null || echo '[release-sync] request failed (non-fatal)'
+  fi
+fi
