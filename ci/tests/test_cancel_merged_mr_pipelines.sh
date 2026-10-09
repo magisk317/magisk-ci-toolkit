@@ -19,6 +19,7 @@ url=""
 page=1
 per_page=100
 write_out=""
+token=""
 
 while (($# > 0)); do
   case "$1" in
@@ -41,7 +42,13 @@ while (($# > 0)); do
       esac
       shift 2
       ;;
-    --header | --data)
+    --header)
+      case "$2" in
+        PRIVATE-TOKEN:*) token="${2#PRIVATE-TOKEN: }" ;;
+      esac
+      shift 2
+      ;;
+    --data)
       shift 2
       ;;
     --fail | --silent | --show-error | --location | --get)
@@ -49,6 +56,9 @@ while (($# > 0)); do
       ;;
     http://* | https://*)
       url="$1"
+      if [[ -n "${MOCK_TOKEN_LOG:-}" ]]; then
+        printf '%s\t%s\t%s\n' "$token" "$method" "$url" >>"$MOCK_TOKEN_LOG"
+      fi
       shift
       ;;
     *)
@@ -184,6 +194,7 @@ start_case() {
   : >"$case_dir/pages.log"
   : >"$case_dir/cancel-attempts.log"
   : >"$case_dir/sleep.log"
+  : >"$case_dir/tokens.log"
   printf '0\n' >"$case_dir/upstream-pipeline-count"
   printf '0\n' >"$case_dir/merge-requests-count"
   printf '0\n' >"$case_dir/mr-pipelines-count"
@@ -211,6 +222,8 @@ write_mr_pipelines() {
 
 run_controller() {
   local fail_ids="${1:-}"
+  # Second argument: MAGISK_CI_MR_AUTOMERGE_TOKEN, empty when unset.
+  local mr_token="${2:-}"
   # shellcheck disable=SC1091
   source "$case_dir/upstream.env"
   set +e
@@ -221,6 +234,7 @@ run_controller() {
     MOCK_MR_PIPELINES_FILE="$case_dir/mr-pipelines.json" \
     MOCK_PAGE_LOG="$case_dir/pages.log" \
     MOCK_CANCEL_ATTEMPT_LOG="$case_dir/cancel-attempts.log" \
+    MOCK_TOKEN_LOG="$case_dir/tokens.log" \
     MOCK_UPSTREAM_PIPELINE_COUNT_FILE="$case_dir/upstream-pipeline-count" \
     MOCK_MERGE_REQUESTS_COUNT_FILE="$case_dir/merge-requests-count" \
     MOCK_MR_PIPELINES_COUNT_FILE="$case_dir/mr-pipelines-count" \
@@ -241,6 +255,7 @@ run_controller() {
     CI_DEFAULT_BRANCH="main" \
     CI_COMMIT_REF_PROTECTED="true" \
     MAGISK_CI_PIPELINE_CONTROL_TOKEN="test-token" \
+    MAGISK_CI_MR_AUTOMERGE_TOKEN="$mr_token" \
     MAGISK_UPSTREAM_PROJECT_ID="$MAGISK_UPSTREAM_PROJECT_ID" \
     MAGISK_UPSTREAM_PROJECT_PATH="$MAGISK_UPSTREAM_PROJECT_PATH" \
     MAGISK_UPSTREAM_PIPELINE_ID="$MAGISK_UPSTREAM_PIPELINE_ID" \
@@ -277,6 +292,20 @@ assert_state() {
   jq -e --argjson expected "$expected" '. == $expected' "$case_dir/state.json" >/dev/null || {
     echo "Unexpected canceled pipeline state" >&2
     cat "$case_dir/state.json" >&2
+    exit 1
+  }
+}
+
+# assert_request_token <token> <method> <url>: one API call reached the server
+# with this credential. The controller splits merge-request reads from
+# pipeline reads so a consumer whose pipeline control token is denied
+# merge-request access (a private project) still gets cleaned up. The mock
+# logs the request line before curl appends --data-urlencode query strings.
+assert_request_token() {
+  local token="$1" method="$2" url="$3"
+  grep -Fx "$(printf '%s\t%s\t%s' "$token" "$method" "$url")" "$case_dir/tokens.log" >/dev/null || {
+    echo "Expected ${method} ${url} to authenticate as ${token}" >&2
+    cat "$case_dir/tokens.log" >&2
     exit 1
   }
 }
@@ -455,5 +484,27 @@ write_mr_pipelines '{"12":[{"id":920,"source":"merge_request_event","status":"ru
 run_controller
 assert_success
 assert_state '[920]'
+
+start_case "merge-request-reads-use-automerge-token"
+write_upstream 770 77 push beta 84113188 magisk3171/xinyi-relay
+write_merge_requests '[{"iid":195,"state":"merged","merged_at":"2026-10-09T15:32:57.498Z"}]'
+write_mr_pipelines '{"195":[{"id":930,"source":"merge_request_event","status":"running"}]}'
+run_controller "" "merge-token"
+assert_success
+assert_state '[930]'
+assert_request_token "merge-token" GET "https://gitlab.example/api/v4/projects/84113188/merge_requests"
+assert_request_token "merge-token" GET "https://gitlab.example/api/v4/projects/84113188/merge_requests/195/pipelines"
+assert_request_token "test-token" GET "https://gitlab.example/api/v4/projects/84113188/pipelines/770"
+assert_request_token "test-token" POST "https://gitlab.example/api/v4/projects/84113188/pipelines/930/cancel"
+
+start_case "merge-request-reads-fall-back-to-control-token"
+write_upstream 780 78 push beta 84113188 magisk3171/xinyi-relay
+write_merge_requests '[{"iid":195,"state":"merged","merged_at":"2026-10-09T15:32:57.498Z"}]'
+write_mr_pipelines '{"195":[{"id":940,"source":"merge_request_event","status":"running"}]}'
+run_controller
+assert_success
+assert_state '[940]'
+assert_request_token "test-token" GET "https://gitlab.example/api/v4/projects/84113188/merge_requests"
+assert_request_token "test-token" GET "https://gitlab.example/api/v4/projects/84113188/merge_requests/195/pipelines"
 
 echo "cancel_merged_mr_pipelines tests passed"

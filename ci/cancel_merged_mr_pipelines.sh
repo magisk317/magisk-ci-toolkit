@@ -20,6 +20,15 @@
 # canceled. Source-branch push pipelines are handled by the cross-family rule
 # in cancel_older_mr_pipelines.sh, and the target-branch pipeline itself is
 # the pipeline that must keep running.
+#
+# Credentials: merge-request reads run as MAGISK_CI_MR_AUTOMERGE_TOKEN, the
+# same identity ci/auto_merge_upstream_mr.sh already uses for merge-request
+# calls, so every consumer that can auto-merge can also name its merged
+# requests here. Pipeline reads and cancels keep the narrower pipeline control
+# token: on a private consumer that token can list pipelines yet is denied
+# merge-request reads, which is why the two families must not share one
+# credential. The automerge token is optional; without it the MR reads fall
+# back to the control token.
 set -euo pipefail
 
 readonly CONTROLLER_PROJECT_ID="83955109"
@@ -101,6 +110,14 @@ api_curl() {
   curl --fail --silent --show-error --location "${auth_header[@]}" "$@"
 }
 
+# Merge-request reads use the automerge identity when it is configured; see
+# the credential note in the file header for why the two families differ.
+merge_auth_header=(--header "PRIVATE-TOKEN: ${MAGISK_CI_MR_AUTOMERGE_TOKEN:-$MAGISK_CI_PIPELINE_CONTROL_TOKEN}")
+
+merge_api_curl() {
+  curl --fail --silent --show-error --location "${merge_auth_header[@]}" "$@"
+}
+
 # Post-merge cleanup serves exactly one upstream family: the push that lands
 # the merge on the protected target branch. Every other upstream source has
 # no merged MRs to clean up after.
@@ -179,7 +196,7 @@ list_merged_merge_requests() {
   while :; do
     ((page <= max_pages)) || fail "merge request pagination exceeded ${max_pages} pages"
     body_file="$tmp_dir/merge-requests-page-${page}.json"
-    if ! api_get_with_retry api_curl "$body_file" \
+    if ! api_get_with_retry merge_api_curl "$body_file" \
       --get \
       --data-urlencode "state=merged" \
       --data-urlencode "target_branch=${upstream_ref}" \
@@ -229,7 +246,7 @@ list_mr_event_pipelines() {
   while :; do
     ((page <= max_pages)) || fail "merge request pipeline pagination exceeded ${max_pages} pages"
     body_file="$tmp_dir/mr-${mr_iid}-pipelines-page-${page}.json"
-    if ! api_get_with_retry api_curl "$body_file" \
+    if ! api_get_with_retry merge_api_curl "$body_file" \
       --get \
       --data-urlencode "per_page=${page_size}" \
       --data-urlencode "page=${page}" \
