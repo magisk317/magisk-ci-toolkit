@@ -77,13 +77,13 @@ while IFS= read -r match; do
   rest="${match#*:}"
   line="${rest#*:}"
   key="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*([A-Z0-9_]+):.*/\1/')"
-  referenced="$(printf '%s' "$line" | sed -E 's/.*"\$([A-Z0-9_]+)".*/\1/')"
+  referenced="$(printf '%s' "$line" | sed -E 's/.*"[$]([A-Z0-9_]+)".*/\1/')"
   if [[ "$key" == "$referenced" ]]; then
     printf 'FAIL: %s defines %s from "$%s"; GitLab passes the literal string downstream\n' \
       "$location" "$key" "$referenced" >&2
     status=1
   fi
-done < <(grep -rnE '^[[:space:]]+[A-Z0-9_]+: "\$[A-Z0-9_]+"' .gitlab-ci.yml .gitlab/ci/*.yml)
+done < <(grep -rnE '^[[:space:]]+[A-Z0-9_]+: "[$][A-Z0-9_]+"' .gitlab-ci.yml .gitlab/ci/*.yml)
 
 if ((status == 0)); then
   printf 'OK: %d predefined variable references are known-good\n' "${#referenced_variables[@]}"
