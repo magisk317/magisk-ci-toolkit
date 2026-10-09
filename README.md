@@ -394,12 +394,16 @@ GitLab has no cancel-on-merge. Native `auto_cancel:on_new_commit` only fires whe
 a new pipeline starts on the *same* ref, so a merged MR's own
 `merge_request_event` pipeline — its ref receives no further pipeline — runs to
 completion against already merged code and keeps occupying the runner. Set
-`MAGISK_CANCEL_MERGED_MR_PIPELINES=true` on the consumer to let every push
-pipeline additionally cancel the still-active `merge_request_event` pipelines of
-the merge requests merged in the window around that push pipeline's creation
-(default: 15 minutes before to 1 minute after). The opt-in is forwarded through
-the same `.pre` trigger, is checked against the trusted target branch, and is a
-best-effort cleanup that never affects the merge itself.
+`MAGISK_CANCEL_MERGED_MR_PIPELINES=true` as a consumer pipeline variable to let
+every push pipeline additionally cancel the still-active
+`merge_request_event` pipelines of the merge requests merged in the window
+around that push pipeline's creation (default: 15 minutes before to 1 minute
+after). Like `MAGISK_CANCEL_OLDER_MR_PIPELINES`, the opt-in reaches the
+controller through GitLab's forwarding of upstream pipeline variables — it must
+not be re-declared in the trigger job's `variables:` block, because GitLab
+passes a self-referencing trigger variable down as the literal string. The
+cleanup is checked against the trusted target branch and stays best-effort, so
+it can never affect a merge.
 
 Every controller API call goes through the shared retry ladder in
 `ci/api_retry.sh`: transient failures (curl exit 6/7/28/35/52/55/56/60 or HTTP

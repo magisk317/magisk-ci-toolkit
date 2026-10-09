@@ -19,12 +19,18 @@
 #
 # Post-merge cleanup (opt-in with MAGISK_CANCEL_MERGED_MR_PIPELINES=true):
 # a merge that lands on the protected target branch starts a new push
-# pipeline, and native auto-cancel:on_new_commit only ever fires on the
+# pipeline, and native auto_cancel:on_new_commit only ever fires on the
 # pushed ref. The merged MR's own merge_request_event pipeline sits on a ref
 # that receives no further pipeline, so it runs to completion against already
 # merged code. The push pipeline therefore asks the controller to cancel the
 # merge_request_event pipelines of the merge requests merged just before it
 # was created, closing that gap within seconds of the merge.
+#
+# The opt-in is NOT re-declared in this anchor's variables block: GitLab
+# passes a trigger variable that references its own key down as the literal
+# string, which would shadow the forwarded "true" and silently disable the
+# cleanup. Like MAGISK_CANCEL_OLDER_MR_PIPELINES, the consumer sets it as a
+# pipeline variable and GitLab forwards it to the downstream pipeline as-is.
 
 .magisk_cancel_older_mr_pipelines:
   stage: .pre
@@ -64,4 +70,3 @@
     MAGISK_UPSTREAM_PIPELINE_IID: "$CI_PIPELINE_IID"
     MAGISK_UPSTREAM_PIPELINE_SOURCE: "$CI_PIPELINE_SOURCE"
     MAGISK_UPSTREAM_PIPELINE_KIND: "$MAGISK_TRIGGER_PIPELINE_KIND"
-    MAGISK_CANCEL_MERGED_MR_PIPELINES: "$MAGISK_CANCEL_MERGED_MR_PIPELINES"

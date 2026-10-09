@@ -65,6 +65,26 @@ if grep -rq '[$]CI_MERGE_REQUEST_SOURCE_BRANCH"' .gitlab-ci.yml .gitlab/ci/*.yml
   status=1
 fi
 
+# 3. No variable may be defined from a reference to its own key. GitLab does
+#    not expand a self-reference in a trigger job's variables block: the
+#    downstream pipeline receives the literal "$KEY", which also shadows the
+#    value GitLab forwards from the upstream pipeline. Regression this
+#    prevents: MAGISK_CANCEL_MERGED_MR_PIPELINES was forwarded as
+#    "$MAGISK_CANCEL_MERGED_MR_PIPELINES", so the post-merge cleanup silently
+#    never ran.
+while IFS= read -r match; do
+  location="${match%%:*}"
+  rest="${match#*:}"
+  line="${rest#*:}"
+  key="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*([A-Z0-9_]+):.*/\1/')"
+  referenced="$(printf '%s' "$line" | sed -E 's/.*"\$([A-Z0-9_]+)".*/\1/')"
+  if [[ "$key" == "$referenced" ]]; then
+    printf 'FAIL: %s defines %s from "$%s"; GitLab passes the literal string downstream\n' \
+      "$location" "$key" "$referenced" >&2
+    status=1
+  fi
+done < <(grep -rnE '^[[:space:]]+[A-Z0-9_]+: "\$[A-Z0-9_]+"' .gitlab-ci.yml .gitlab/ci/*.yml)
+
 if ((status == 0)); then
   printf 'OK: %d predefined variable references are known-good\n' "${#referenced_variables[@]}"
 fi
