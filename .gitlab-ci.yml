@@ -57,12 +57,14 @@ shell:test:
       shellcheck -x
       ci/cancel_older_mr_pipelines.sh
       ci/cancel_older_renovate_pipelines.sh
+      ci/cancel_merged_mr_pipelines.sh
       ci/auto_merge_upstream_mr.sh
       ci/auto_merge_self_renovate_mrs.sh
       ci/renovate_serial_loop.sh
       gradle/run_gradle_with_retry.sh
       ci/tests/test_cancel_older_mr_pipelines.sh
       ci/tests/test_cancel_older_renovate_pipelines.sh
+      ci/tests/test_cancel_merged_mr_pipelines.sh
       ci/tests/test_ci_predefined_variables.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_auto_merge_self_renovate_mrs.sh
@@ -75,6 +77,7 @@ shell:test:
       ci/tests/test_trusted_projects.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
     - bash ci/tests/test_cancel_older_renovate_pipelines.sh
+    - bash ci/tests/test_cancel_merged_mr_pipelines.sh
     - bash ci/tests/test_ci_predefined_variables.sh
     - bash ci/tests/test_auto_merge_upstream_mr.sh
     - bash ci/tests/test_auto_merge_self_renovate_mrs.sh
@@ -153,6 +156,7 @@ cancel:older:mr:pipelines:
       set -euo pipefail
       merge_status=0
       cancel_status=0
+      merged_cancel_status=0
       if [ "${MAGISK_UPSTREAM_PIPELINE_SOURCE}" = "merge_request_event" ]; then
         bash ci/auto_merge_upstream_mr.sh || merge_status=$?
       fi
@@ -163,5 +167,15 @@ cancel:older:mr:pipelines:
       fi
       if [ "$cancel_status" -ne 0 ]; then
         echo "Warning: pipeline cleanup failed; MR merge result is unaffected." >&2
+      fi
+      # Native auto-cancel never fires for a merged MR's own pipeline: its
+      # ref receives no new pipeline after the merge, so that pipeline runs to
+      # completion against merged code. Consumers opt in per push pipeline
+      # with MAGISK_CANCEL_MERGED_MR_PIPELINES=true.
+      if [ "${MAGISK_CANCEL_MERGED_MR_PIPELINES:-}" = "true" ]; then
+        bash ci/cancel_merged_mr_pipelines.sh || merged_cancel_status=$?
+      fi
+      if [ "$merged_cancel_status" -ne 0 ]; then
+        echo "Warning: post-merge MR pipeline cleanup failed; the merge result is unaffected." >&2
       fi
       exit "$merge_status"
