@@ -166,3 +166,36 @@ Renovate `packageManager` bump propagates automatically.
 
 Use `shellcheck` for changed shell files when it is available. Validate edited GitLab YAML with a
 YAML parser before pushing.
+
+## ARM Runner SDK And Build-Tools Completeness
+
+The arm64 runner (Oracle ARM, rootless Docker) keeps its Android SDK on a persistent
+runner volume, so a half-installed build-tools revision survives across pipelines and
+survives image re-pulls. The symptom is a validation failure before any compilation:
+
+```
+Installed Build Tools revision 37.0.0 is corrupted. ...
+```
+
+or `Build-tool 37.0.0 is missing DEXDUMP`.
+
+AGP validates a build-tools revision by checking that the binaries it may invoke exist
+(`aapt`, `aapt2`, `aidl`, `d8`, `dexdump`, `lib/`, ...); it never executes the x86_64
+ones on ARM. Only `aidl` and `aapt2` actually run, and both come from the host ARM
+overlay the runner bind-mounts over the SDK (`/usr/local/bin/aapt2`,
+`/usr/local/bin/aidl`), with AGP pointed at the ARM `aapt2` through
+`-Pandroid.aapt2FromMavenOverride`. Everything else is checked for existence only, so a
+pruned or truncated revision fails the entire build for no functional reason.
+
+`android/install_arm_android_tools.sh` therefore backfills every missing entry in each
+`build-tools/<rev>` directory from the most complete sibling revision after installing
+the requested packages. Version metadata (`source.properties`, `package.xml`,
+`runtime.properties`) is never copied, so AGP still sees the true revision numbers.
+
+When this failure appears, do not hunt for an ARM `aapt`: none exists anywhere on the
+host. Backfill from a complete sibling revision and move on.
+
+History (2026-10-09): after the toolchain bump, every consumer pipeline began failing
+this way because `build-tools/37.0.0` on the runner lacked `aapt`, `d8`, `dexdump` and
+`lib/`. An earlier build that same day had passed with the older AGP, which validated
+fewer binaries -- the regression was the validator, not the SDK.
