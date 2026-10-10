@@ -66,6 +66,8 @@ if grep -Fq '[[ "$track" == beta' "$resolver"; then
   echo 'FAIL: the review gate must not be restricted to the beta track' >&2
   exit 1
 fi
+grep -Fq '"$api_root/$edit_id/bundles"' "$resolver" || { echo 'FAIL: resolver must query edit bundles endpoint' >&2; exit 1; }
+grep -Fq '/generatedApks/' "$resolver" || { echo 'FAIL: resolver must probe generatedApks endpoint for withdrawn bundles' >&2; exit 1; }
 
 echo 'PASS: Play release gate contract'
 

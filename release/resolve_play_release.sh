@@ -88,11 +88,10 @@ if [[ -n "${ANDROID_PUBLISHER_CREDENTIALS:-}" ]]; then
   else
     printf '%s' "$ANDROID_PUBLISHER_CREDENTIALS" | base64 --decode > "$credentials_file" 2>/dev/null || true
   fi
-  if python3 - "$credentials_file" "$key_file" <<'PY'
+  if python3 - "$credentials_file" "$key_file" >/dev/null <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 open(sys.argv[2], "w", encoding="utf-8").write(data["private_key"])
-print(data["client_email"])
 PY
   then
     client_email="$(python3 - "$credentials_file" <<'PY'
@@ -145,10 +144,60 @@ PY
         else
           echo "WARN: Play tracks API returned HTTP $tracks_status for $package_name" >&2
         fi
+        bundles_status="$(curl -sS --retry 2 -H "Authorization: Bearer $access_token" \
+          -o "$api_response" -w '%{http_code}' "$api_root/$edit_id/bundles")" || bundles_status=000
+        bundles_json=''
+        if [[ "$bundles_status" =~ ^2[0-9][0-9]$ ]]; then
+          bundles_json="$(cat "$api_response")"
+        fi
         curl -fsS -X DELETE -H "Authorization: Bearer $access_token" "$api_root/$edit_id" >/dev/null 2>&1 || true
-        if [[ -n "$tracks_json" ]]; then
-          play_max="$(printf '%s' "$tracks_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); v=[int(x) for t in d.get("tracks",[]) for r in t.get("releases",[]) for x in r.get("versionCodes",[])]; print(max(v) if v else "")')"
+        if [[ -n "$tracks_json" || -n "$bundles_json" ]]; then
+          play_max="$(python3 - "$tracks_json" "$bundles_json" <<'PY'
+import json, sys
+vcs = []
+for raw in sys.argv[1:3]:
+    if not raw:
+        continue
+    try:
+        d = json.loads(raw)
+    except Exception:
+        continue
+    for t in d.get("tracks", []):
+        for r in t.get("releases", []):
+            vcs.extend(int(x) for x in r.get("versionCodes", []))
+    for b in d.get("bundles", []):
+        if "versionCode" in b:
+            vcs.append(int(b["versionCode"]))
+print(max(vcs) if vcs else "")
+PY
+)"
           play_query_status=success
+        fi
+      fi
+      # Probe App Bundle Explorer via generatedApks for unlinked/discarded releases.
+      # Google Play permanently burns every uploaded versionCode; re-uploading
+      # collides with "Version code X has already been used".
+      # Probe applications/{packageName}/generatedApks/{code} until the first 404.
+      if [[ "$play_query_status" == success ]]; then
+        probe_base="${play_max:-$initial_version_code}"
+        if [[ "$probe_base" =~ ^[0-9]+$ ]]; then
+          probe_code=$((probe_base + 1))
+          max_probes=100
+          probes=0
+          while (( probes < max_probes )); do
+            gen_url="https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${package_name}/generatedApks/${probe_code}"
+            gen_status="$(curl -sS --retry 1 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $access_token" "$gen_url" 2>/dev/null)" || gen_status=000
+            if [[ "$gen_status" == "200" ]]; then
+              echo "INFO: Found archived/withdrawn bundle with versionCode=$probe_code in Google Play" >&2
+              play_max="$probe_code"
+              probe_code=$((probe_code + 1))
+              probes=$((probes + 1))
+            elif [[ "$gen_status" == "404" ]]; then
+              break
+            else
+              break
+            fi
+          done
         fi
       fi
       # Resolve the real review lifecycle of the target track's latest release
@@ -202,6 +251,9 @@ if [[ "$play_query_status" == success ]]; then
   if [[ -n "$play_max" ]]; then
     version_code=$((play_max + 1))
   else
+    version_code=$((initial_version_code + 1))
+  fi
+  if (( initial_version_code > 0 && version_code <= initial_version_code )); then
     version_code=$((initial_version_code + 1))
   fi
   if (( version_code < ${ci_number:-0} )); then version_code="$ci_number"; fi
