@@ -550,11 +550,11 @@
         title_line="✅ $(telegram_html_escape "$project_name")"
       fi
       ci_msg="$title_line"
+      if [ -n "$event_tag" ]; then
+        tag_line="${tag_line}${tag_line:+ }${event_tag}"
+      fi
       if [ -n "$tag_line" ]; then
         ci_msg+=$'\n'"$(telegram_html_escape "$tag_line")"
-      fi
-      if [ -n "$event_tag" ]; then
-        ci_msg+=$'\n'"$(telegram_html_escape "$event_tag")"
       fi
       if [ -n "$commit_title" ]; then
         ci_msg+=$'\n'"📋 $(telegram_html_link "$CI_PIPELINE_URL" "$commit_title")"
@@ -588,7 +588,7 @@
       bash /tmp/magisk_telegram_ci.sh
 .magisk_telegram_release:
   image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
-  stage: release-publish
+  stage: release
   variables:
     MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
     MAGISK_TELEGRAM_PROJECT_NAME: "$CI_PROJECT_NAME"
@@ -1266,11 +1266,11 @@
       fi
 
       release_head="📦 $(telegram_html_escape "$project_name")：$(telegram_html_escape "$release_tag")"
+      if [ -n "$event_tag" ]; then
+        tag_line="${tag_line}${tag_line:+ }${event_tag}"
+      fi
       if [ -n "$tag_line" ]; then
         release_head+=$'\n'"$(telegram_html_escape "$tag_line")"
-      fi
-      if [ -n "$event_tag" ]; then
-        release_head+=$'\n'"$(telegram_html_escape "$event_tag")"
       fi
       release_head+=$'\n'"🔗 $(telegram_html_link "$release_url" "${MAGISK_TELEGRAM_RELEASE_GITLAB_LABEL:-GitLab}")"
       release_head+="$github_line"
