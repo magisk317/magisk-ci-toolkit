@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 : "${MAGISK_ANDROID_RELEASE_PACKAGE_NAME:?MAGISK_ANDROID_RELEASE_PACKAGE_NAME is required}"
 : "${ANDROID_PUBLISHER_CREDENTIALS:?ANDROID_PUBLISHER_CREDENTIALS is required}"
 : "${MAGISK_PLAY_TRACK:?MAGISK_PLAY_TRACK is required}"
@@ -305,40 +307,27 @@ else
   printf '%s' "$ANDROID_PUBLISHER_CREDENTIALS" | base64 --decode > "$credentials_file"
 fi
 
-# Fastlane/Ruby require an explicit UTF-8 locale in the slim image.
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
-export LANGUAGE=C.UTF-8
-export FASTLANE_OPT_OUT_USAGE=1
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y --no-install-recommends build-essential ruby ruby-dev >/dev/null
-rm -rf /var/lib/apt/lists/*
-gem_user_bin="$(ruby -r rubygems -e 'print Gem.user_dir')/bin"
-export PATH="$gem_user_bin:$PATH"
-gem install --user-install fastlane --no-document >/dev/null
+python_uploader="$SCRIPT_DIR/publish_play.py"
+if [[ ! -f "$python_uploader" ]]; then
+  python_uploader="$(dirname "$0")/publish_play.py"
+fi
 
-cmd=(fastlane supply
+cmd=(python3 "$python_uploader"
+  --credentials "$credentials_file"
+  --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME"
   --aab "$MAGISK_PLAY_AAB_FILE"
-  --package_name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME"
   --track "$MAGISK_PLAY_TRACK"
-  --release_status completed
-  --json_key "$credentials_file"
-  --skip_upload_images true
-  --skip_upload_screenshots true)
+  --version-code "$MAGISK_PLAY_VERSION_CODE"
+  --version-name "$MAGISK_PLAY_VERSION_NAME")
+
 if [[ -n "$metadata_dir" ]]; then
-  cmd+=(--metadata_path "$metadata_dir" --skip_upload_metadata false)
-else
-  cmd+=(--skip_upload_metadata true)
+  cmd+=(--metadata-dir "$metadata_dir")
 fi
-if [[ -n "${MAGISK_PLAY_MAPPING_FILE:-}" && -n "${MAGISK_PLAY_SYMBOLS_FILE:-}" ]]; then
-  cmd+=(--mapping_paths "${MAGISK_PLAY_MAPPING_FILE},${MAGISK_PLAY_SYMBOLS_FILE}")
-elif [[ -n "${MAGISK_PLAY_MAPPING_FILE:-}" ]]; then
-  cmd+=(--mapping "${MAGISK_PLAY_MAPPING_FILE}")
-elif [[ -n "${MAGISK_PLAY_SYMBOLS_FILE:-}" ]]; then
-  cmd+=(--mapping_paths "$MAGISK_PLAY_SYMBOLS_FILE")
+if [[ -n "${MAGISK_PLAY_MAPPING_FILE:-}" && -f "$MAGISK_PLAY_MAPPING_FILE" ]]; then
+  cmd+=(--mapping "$MAGISK_PLAY_MAPPING_FILE")
 fi
-FASTLANE_SKIP_UPDATE_CHECK=1 FASTLANE_DISABLE_COLORS=1 FASTLANE_OPT_OUT_USAGE=1 CI=true "${cmd[@]}"
+
+"${cmd[@]}"
 
 if [[ -n "$release_env_file" ]]; then
   {

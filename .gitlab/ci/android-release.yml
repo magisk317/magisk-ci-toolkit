@@ -14,12 +14,11 @@
     - when: never
 
 .magisk_linux_base:
-  image: "debian:trixie-slim"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
   variables:
     GET_SOURCES_ATTEMPTS: "3"
     MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
     MAGISK_CI_TOOLKIT_REPOSITORY: "https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git"
-    MAGISK_LINUX_APT_PACKAGES: ""
     MAGISK_OTEL_EXPORT: "1"
     MAGISK_OTEL_SERVICE_NAME: "magisk-ci"
     MAGISK_OTEL_ENDPOINT: "https://136325658.otel.gitlab-o11y.com:14318/v1/traces"
@@ -30,46 +29,12 @@
   before_script:
     - |
       set -euo pipefail
-
-      export DEBIAN_FRONTEND=noninteractive
-      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
-      if [[ "$use_mirror" == "true" && ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
-        # debian:trixie-slim needs a one-time CA bootstrap before HTTPS mirrors work.
-        apt-get -o APT::Update::Error-Mode=any update
-        apt-get install -y --no-install-recommends ca-certificates
-        rm -rf /var/lib/apt/lists/*
+      # All essential tools (bash, ca-certificates, curl, git, jq, openssl, python3)
+      # are pre-baked into utility:3.24. Zero apt-get / apk runtime overhead.
+      if [[ -f scripts/resolve_ci_toolkit.sh ]]; then
+        chmod +x scripts/resolve_ci_toolkit.sh
+        bash scripts/resolve_ci_toolkit.sh >/dev/null || true
       fi
-      if [[ "$use_mirror" == "true" ]]; then
-        sed -i \
-          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
-          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
-          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
-          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
-          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
-          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-      fi
-      if [[ "$use_mirror" == "true" ]]; then
-        if ! apt-get -o APT::Update::Error-Mode=any update; then
-          echo "Mirror apt-get update failed, falling back to official sources" >&2
-          sed -i \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          apt-get -o APT::Update::Error-Mode=any update
-        fi
-      else
-        apt-get -o APT::Update::Error-Mode=any update
-      fi
-      apt_packages=(bash ca-certificates curl git openssl python3)
-      for package in $MAGISK_LINUX_APT_PACKAGES; do
-        apt_packages+=("$package")
-      done
-      apt-get install -y --no-install-recommends "${apt_packages[@]}"
-      rm -rf /var/lib/apt/lists/*
-
-      chmod +x scripts/resolve_ci_toolkit.sh
-      bash scripts/resolve_ci_toolkit.sh >/dev/null
   after_script:
     - |
       set +e
