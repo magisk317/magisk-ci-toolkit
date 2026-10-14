@@ -16,8 +16,7 @@ extract_template() {
 }
 
 linux_base="$(extract_template '.magisk_linux_base')"
-[[ "$linux_base" == *'image: "debian:trixie-slim"'* ]] || fail "lightweight image is missing"
-[[ "$linux_base" == *'apt_packages=(bash ca-certificates curl git openssl python3)'* ]] || fail "base tools are incomplete"
+[[ "$linux_base" == *'utility:3.24'* ]] || fail "lightweight utility image is missing"
 [[ "$linux_base" == *'scripts/resolve_ci_toolkit.sh'* ]] || fail "toolkit checkout is missing"
 
 apk_release="$(extract_template '.magisk_android_release_apk')"
