@@ -260,6 +260,17 @@ for ((pass = 1; pass <= reconcile_passes; pass++)); do
       "${api_base}/${pipeline_id}/cancel"; then
       echo "Warning: failed to cancel pipeline ${pipeline_id}; it will be checked again." >&2
     fi
+
+    # Sweep orphan jobs that GitLab auto-cancel missed or left stuck in pending/canceling
+    jobs_file="$tmp_dir/jobs-${pass}-${pipeline_id}.json"
+    if api_curl --output "$jobs_file" "${api_base}/${pipeline_id}/jobs?per_page=100" 2>/dev/null; then
+      orphan_job_ids="$(jq -r '.[] | select(.status == "pending" or .status == "running" or .status == "waiting_for_resource" or .status == "canceling") | .id' "$jobs_file" 2>/dev/null || true)"
+      for orphan_id in $orphan_job_ids; do
+        [[ "$orphan_id" =~ ^[0-9]+$ ]] || continue
+        echo "Sweeping orphaned job ${orphan_id} in canceled pipeline ${pipeline_id}."
+        api_curl --request POST "${CI_API_V4_URL}/projects/${upstream_project_id}/jobs/${orphan_id}/cancel" >/dev/null 2>&1 || true
+      done
+    fi
   done <"$candidates_file"
 
   if ((pass < reconcile_passes && reconcile_delay > 0)); then

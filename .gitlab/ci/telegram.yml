@@ -589,6 +589,7 @@
 .magisk_telegram_release:
   image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
   stage: release
+  interruptible: false
   variables:
     MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
     MAGISK_TELEGRAM_PROJECT_NAME: "$CI_PROJECT_NAME"
