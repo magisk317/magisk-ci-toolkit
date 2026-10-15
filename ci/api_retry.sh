@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Shared transient-failure retry ladder for the controller's GitLab API calls.
 #
-# Sourced by auto_merge_upstream_mr.sh, cancel_older_mr_pipelines.sh and
-# cancel_older_renovate_pipelines.sh so one implementation serves every read
-# and state-changing call.
+# Sourced by auto_merge_upstream_mr.sh, auto_merge_self_renovate_mrs.sh,
+# cancel_older_mr_pipelines.sh and cancel_older_renovate_pipelines.sh so one
+# implementation serves every read and state-changing call.
 #
 # 2026-09-29, MiPush pipeline 2892824485: a single `curl: (35) Recv failure:
 # Connection reset by peer` on the merge-request read killed the controller

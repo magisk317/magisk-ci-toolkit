@@ -21,6 +21,15 @@
 # resulting push pipeline. The script also performs the latest-wins
 # cancellation of obsolete Renovate pipelines that consumers receive from
 # the renovate bridge kind.
+#
+# Transport-level failures on every GitLab API call - reads, the merge and
+# the pipeline cancellation alike - are absorbed by the shared retry ladder
+# in ci/api_retry.sh, the same implementation the consumer controller and
+# both cancel scripts source. 2026-10-14: a clash container recreation on
+# the runner's proxy host refused connections for a few seconds and the
+# single-shot sibling-status poll failed this job four minutes before the
+# merge request it existed to merge had even been created, leaving the
+# request to the next day's schedule.
 set -euo pipefail
 
 readonly CONTROLLER_PROJECT_ID="83955109"
@@ -34,6 +43,10 @@ readonly DEFAULT_PAGE_SIZE=100
 readonly DEFAULT_MAX_PAGES=1000
 readonly ACTIVE_PIPELINE_STATUSES='"created","waiting_for_resource","preparing","pending","running","manual","scheduled"'
 readonly RENOVATE_PIPELINE_SOURCES='"schedule","web","api"'
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/api_retry.sh
+source "$script_dir/api_retry.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -125,55 +138,34 @@ done
 ((${#mr_merge_tokens[@]} > 0)) || fail "no token with merge access is available"
 ((${#pipeline_read_tokens[@]} > 0)) || fail "no token with pipeline read access is available"
 
-# api_request <token> <output-file> <method> [curl args...]:
-# prints the HTTP status code; returns non-zero only when curl itself fails.
-api_request() {
-  local token="$1"
-  local output_file="$2"
-  local method="$3"
-  shift 3
+# api_curl is invoked by name from the shared retry ladder in
+# ci/api_retry.sh, which cannot pass the per-token header itself; the active
+# token is therefore published in this global before every call. The ladder
+# adds --fail, --output and --write-out itself, so this wrapper must not.
+# shellcheck disable=SC2329 # Called by name from api_get_with_retry / api_write_with_retry.
+api_curl_token=""
+api_curl() {
   curl --silent --show-error --location \
-    --header "PRIVATE-TOKEN: ${token}" \
-    --request "$method" \
-    --output "$output_file" \
-    --write-out '%{http_code}' "$@"
+    --header "PRIVATE-TOKEN: ${api_curl_token}" \
+    "$@"
 }
 
-# get_with_tokens <tokens-array-name> <output-file> [curl args...]:
-# performs a GET with the first token whose credentials return a 2xx status;
-# exits with every token's error when none succeeds.
+# get_with_tokens <tokens-array-name> <output-file> [curl args...] <url>:
+# performs a GET through the shared retry ladder with the first token whose
+# credentials return a 2xx status. The URL must be the last argument (the
+# ladder's contract). Returns non-zero when no token succeeds, leaving each
+# token's failure diagnostics on stderr.
 get_with_tokens() {
   local -n tokens="$1"
   local output_file="$2"
   shift 2
-  local code
-  local errors=""
   local token
   for token in "${tokens[@]}"; do
-    if code="$(api_request "$token" "$output_file" GET "$@")" && [[ "$code" =~ ^2 ]]; then
+    api_curl_token="$token"
+    if api_get_with_retry api_curl "$output_file" "$@"; then
       return 0
     fi
-    errors+="HTTP ${code:-curl-failed}: $(head -c 200 "$output_file" 2>/dev/null)"$'\n'
   done
-  fail "no available token can perform the request: ${errors}"
-}
-
-# try_get_with_tokens: same as get_with_tokens, but returns non-zero instead
-# of exiting; used by the best-effort cleanup paths.
-try_get_with_tokens() {
-  local -n tokens="$1"
-  local output_file="$2"
-  shift 2
-  local code
-  local errors=""
-  local token
-  for token in "${tokens[@]}"; do
-    if code="$(api_request "$token" "$output_file" GET "$@")" && [[ "$code" =~ ^2 ]]; then
-      return 0
-    fi
-    errors+="HTTP ${code:-curl-failed}: $(head -c 200 "$output_file" 2>/dev/null)"$'\n'
-  done
-  echo "${errors}" >&2
   return 1
 }
 
@@ -300,9 +292,20 @@ merge_merge_request() {
     saw_auth_rejection=0
     saw_readiness_failure=0
     for token in "${mr_merge_tokens[@]}"; do
-      http_status="$(api_request "$token" "$response_file" PUT \
+      api_curl_token="$token"
+      # The merge PUT rides the same ladder as the reads: a transport-level
+      # failure here would otherwise kill the job after the merge request was
+      # already validated - the failure class the 2026-10-14 clash recreation
+      # exposed on the read path, reached a second time on the merge itself.
+      # Readiness failures (405/422/429/5xx) fall through to the outer
+      # attempt loop below; only an exhausted transport gives up (the 000
+      # branch in the case statement).
+      if ! http_status="$(api_write_with_retry api_curl "$response_file" \
+        --request PUT \
         --data-urlencode "sha=${mr_sha}" \
-        "${api_base}/merge_requests/${iid}/merge")" || fail "merge API request failed"
+        "${api_base}/merge_requests/${iid}/merge")"; then
+        http_status="${http_status:-000}"
+      fi
 
       case "$http_status" in
         200)
@@ -325,6 +328,12 @@ merge_merge_request() {
         409)
           echo "Merge request !${iid} HEAD changed while merging."
           saw_readiness_failure=1
+          ;;
+        000)
+          # The retry ladder exhausted its attempts: the transport is broken,
+          # not the merge request. Another token would hit the same wall, and
+          # the next scheduled run picks the request up.
+          fail "merge API request for !${iid} kept failing at the transport level after ${api_retry_attempts} attempts"
           ;;
         *)
           message="$(jq -r '.message // .error // "unexpected response"' "$response_file" 2>/dev/null || printf '%s' 'unexpected response')"
@@ -355,10 +364,10 @@ merge_merge_request() {
 pipeline_has_loop_job() {
   local pipeline_id="$1"
   local jobs_file="$tmp_dir/cleanup-jobs-${pipeline_id}.json"
-  try_get_with_tokens pipeline_read_tokens "$jobs_file" \
+  get_with_tokens pipeline_read_tokens "$jobs_file" \
     --get \
     --data-urlencode "per_page=100" \
-    "${api_base}/pipelines/${pipeline_id}/jobs" >/dev/null || return 1
+    "${api_base}/pipelines/${pipeline_id}/jobs" || return 1
   jq -e --arg name "$loop_job_name" 'any(.[]; .name == $name)' "$jobs_file" >/dev/null 2>&1
 }
 
@@ -374,13 +383,12 @@ cancel_older_renovate_pipelines() {
   local candidates=()
   local newer_exists=0
   local token
-  local code
   local cancel_failed
 
   while :; do
     ((page <= max_pages)) || fail "pipeline pagination exceeded ${max_pages} pages"
     response_file="$tmp_dir/cleanup-pipelines-page-${page}.json"
-    if ! try_get_with_tokens pipeline_read_tokens "$response_file" \
+    if ! get_with_tokens pipeline_read_tokens "$response_file" \
       --get \
       --data-urlencode "order_by=id" \
       --data-urlencode "sort=desc" \
@@ -438,8 +446,12 @@ cancel_older_renovate_pipelines() {
     echo "Canceling obsolete Renovate pipeline ${pipeline_id}."
     cancel_failed=1
     for token in "${pipeline_cancel_tokens[@]}"; do
-      if code="$(api_request "$token" "$tmp_dir/cancel-${pipeline_id}.json" POST \
-        "${api_base}/pipelines/${pipeline_id}/cancel")" && [[ "$code" =~ ^2 ]]; then
+      api_curl_token="$token"
+      # Best-effort cancellation through the same ladder as everything else:
+      # the ladder returns zero exactly when the final status was 2xx.
+      if api_write_with_retry api_curl "$tmp_dir/cancel-${pipeline_id}.json" \
+        --request POST \
+        "${api_base}/pipelines/${pipeline_id}/cancel" >/dev/null; then
         cancel_failed=0
         break
       fi

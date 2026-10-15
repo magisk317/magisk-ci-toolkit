@@ -61,6 +61,21 @@ done
   exit 64
 }
 
+# Transient-failure injection: when the URL matches MOCK_CURL_FAIL_URL_MATCH
+# (an ERE) and this case's failure count is still below MOCK_CURL_FAIL_TIMES,
+# simulate a curl transport failure - default exit 7, the "connection refused"
+# class the 2026-10-14 clash container recreation produced - before the
+# request is routed, so no state is recorded for the failed attempt.
+if [[ -n "${MOCK_CURL_FAIL_URL_MATCH:-}" && "$url" =~ ${MOCK_CURL_FAIL_URL_MATCH} ]]; then
+  if [[ -n "${MOCK_CURL_FAIL_COUNT_FILE:-}" ]]; then
+    fail_count="$(cat "$MOCK_CURL_FAIL_COUNT_FILE")"
+    printf '%s\n' "$((fail_count + 1))" >"$MOCK_CURL_FAIL_COUNT_FILE"
+    if ((fail_count < ${MOCK_CURL_FAIL_TIMES:-1})); then
+      exit "${MOCK_CURL_FAIL_EXIT:-7}"
+    fi
+  fi
+fi
+
 respond() {
   printf '%s' "$1" >"$output_file"
   if [[ "$write_out" == "%{http_code}" ]]; then printf '200'; fi
@@ -177,6 +192,7 @@ start_case() {
   printf '0\n' >"$case_dir/cancel-count"
   printf '0\n' >"$case_dir/sibling-calls"
   printf '0\n' >"$case_dir/mr-list-calls"
+  printf '0\n' >"$case_dir/curl-fail-count"
   : >"$case_dir/sleep.log"
   printf '%s\n' running running success >"$case_dir/sibling-status"
   printf '%s\n' \
@@ -209,6 +225,10 @@ run_self_merge() {
     MOCK_CANCEL_COUNT_FILE="$case_dir/cancel-count" \
     MOCK_SLEEP_LOG="$case_dir/sleep.log" \
     MOCK_MERGE_STATUSES="${MOCK_MERGE_STATUSES:-200}" \
+    MOCK_CURL_FAIL_TIMES="${MOCK_CURL_FAIL_TIMES:-1}" \
+    MOCK_CURL_FAIL_URL_MATCH="${MOCK_CURL_FAIL_URL_MATCH:-}" \
+    MOCK_CURL_FAIL_EXIT="${MOCK_CURL_FAIL_EXIT:-7}" \
+    MOCK_CURL_FAIL_COUNT_FILE="$case_dir/curl-fail-count" \
     CI_API_V4_URL="https://gitlab.example/api/v4" \
     CI_PROJECT_ID="${SELF_MERGE_TEST_PROJECT_ID:-83955109}" \
     CI_PROJECT_PATH="magisk3171/shared/magisk-ci-toolkit" \
@@ -385,5 +405,39 @@ SELF_MERGE_TEST_CONTROL_TOKEN="" run_self_merge
 assert_success
 assert_cancel_count 0
 assert_output_contains "No obsolete active Renovate pipelines to cancel"
+
+start_case "survives-transient-read-failure"
+# 2026-10-14 replay: the single-shot sibling-status poll is the call that died
+# when the runner's proxy refused connections. The shared ladder must absorb
+# it and still merge the request in the same run.
+printf '%s\n' running running success >"$case_dir/sibling-status"
+MOCK_CURL_FAIL_URL_MATCH='/jobs$' run_self_merge
+assert_success
+assert_merge_count 1
+assert_output_contains "Transient failure calling"
+assert_output_contains "Merged merge request !12 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa without waiting for pipeline success"
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "survives-transient-merge-failure"
+# Same failure class on the merge PUT itself: the ladder retries the write
+# instead of killing the job after the request was already validated.
+printf '%s\n' running success >"$case_dir/sibling-status"
+printf '%s\n' "[${default_mr}]" '[]' '[]' >"$case_dir/mr-list-seq"
+MOCK_CURL_FAIL_URL_MATCH='/merge$' run_self_merge
+assert_success
+assert_merge_count 1
+assert_output_contains "Transient failure calling"
+grep -Fx '2' "$case_dir/sleep.log" >/dev/null
+
+start_case "exhausted-merge-retries-fail"
+# A transport that stays broken for the whole ladder must fail loudly with
+# the 000 branch instead of silently rotating tokens or burning the window.
+printf '%s\n' running success >"$case_dir/sibling-status"
+printf '%s\n' "[${default_mr}]" '[]' >"$case_dir/mr-list-seq"
+MOCK_CURL_FAIL_URL_MATCH='/merge$' MOCK_CURL_FAIL_TIMES="99" run_self_merge
+assert_failure
+assert_merge_count 0
+assert_output_contains "kept failing at the transport level after 6 attempts"
+grep -Fx '32' "$case_dir/sleep.log" >/dev/null
 
 echo "auto_merge_self_renovate_mrs tests passed"
