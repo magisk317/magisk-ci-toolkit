@@ -13,7 +13,7 @@
   # the same branches instead of opening duplicates.
   retry:
     max: 2
-  image: "renovate/renovate:44.160.0"
+  image: "renovate/renovate:44.164.6"
   stage: maintenance
   needs: []
   variables:
