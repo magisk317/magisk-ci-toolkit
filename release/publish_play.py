@@ -42,15 +42,24 @@ def get_access_token(service_account_json: dict) -> str:
     )
 
     # Sign using openssl (always present in utility/alpine/debian images)
-    proc = subprocess.Popen(
-        ["openssl", "dgst", "-sha256", "-sign", "/dev/stdin"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    sig_raw, err = proc.communicate(input=private_key_pem.encode("utf-8"))
-    if proc.returncode != 0:
-        raise RuntimeError(f"openssl signing failed: {err.decode('utf-8')}")
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", delete=False) as key_file:
+        key_file.write(private_key_pem)
+        key_path = key_file.name
+
+    try:
+        proc = subprocess.Popen(
+            ["openssl", "dgst", "-sha256", "-sign", key_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        sig_raw, err = proc.communicate(input=unsigned_token.encode("utf-8"))
+        if proc.returncode != 0:
+            raise RuntimeError(f"openssl signing failed: {err.decode('utf-8')}")
+    finally:
+        if os.path.exists(key_path):
+            os.unlink(key_path)
 
     signed_jwt = f"{unsigned_token}.{base64url(sig_raw)}"
 
