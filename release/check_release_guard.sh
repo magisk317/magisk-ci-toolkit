@@ -144,6 +144,55 @@ check_changelog_section() {
   fi
 }
 
+# versionCode must be exactly last-released + 1 (no jumps, no reuse).
+# The CHANGELOG's first version section is the release being prepared; the
+# second one is the last released version, whose versionCode is the baseline.
+check_versioncode_increment() {
+  local root_dir="$1"
+  local toml_file="${root_dir}/gradle/libs.versions.toml"
+  local changelog_file="${root_dir}/docs/CHANGELOG.md"
+
+  if [[ ! -f "$toml_file" ]]; then
+    echo "FAIL: missing version catalog ($toml_file)"
+    return 1
+  fi
+  if [[ ! -f "$changelog_file" ]]; then
+    echo "FAIL: missing changelog file ($changelog_file)"
+    return 1
+  fi
+
+  local current_code prev_code expected
+  current_code="$(extract_toml_value versionCode "$toml_file")"
+  if [[ ! "$current_code" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: versionCode is not numeric: '$current_code' ($toml_file)"
+    return 1
+  fi
+
+  prev_code="$(awk '
+    /^- 版本：`versionCode [0-9]+/ {
+      if (++seen == 2) {
+        line = $0
+        sub(/^- 版本：`versionCode /, "", line)
+        sub(/`.*$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$changelog_file")"
+  if [[ ! "$prev_code" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: cannot read the previous released versionCode from $changelog_file" >&2
+    echo "      (expected the second '- versionCode N' line below the in-progress section)" >&2
+    return 1
+  fi
+
+  expected=$((prev_code + 1))
+  if (( current_code != expected )); then
+    echo "FAIL: versionCode $current_code is not last-released+1 (last released $prev_code, expected $expected)" >&2
+    return 1
+  fi
+  echo "PASS: versionCode $current_code = last released $prev_code + 1"
+}
+
 # Check tag matches version
 check_tag_matches_version() {
   local tag_name="$1"
@@ -272,6 +321,7 @@ check_release_guard() {
   check_version_extraction "$root_dir" || fail=1
   check_commit_subjects "$root_dir" "$allow_non_ascii" || fail=1
   check_changelog_section "$root_dir" "$VERSION_NAME" || fail=1
+  check_versioncode_increment "$root_dir" || fail=1
   check_readme_badges "$root_dir" || fail=1
   check_tag_matches_version "$tag_name" "$VERSION_NAME" || fail=1
 
