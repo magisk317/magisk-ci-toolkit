@@ -109,18 +109,18 @@ if [[ "$show_play_link" == "true" ]]; then
   </a>
 EOF
 fi
+if [[ -n "$source_repo" ]]; then
+  cat >> "$output_file" <<EOF
+  <a href="https://github.com/${source_repo}/releases/tag/${tag_name}">
+    <img src="https://img.shields.io/badge/Get%20it%20on-GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Get it on GitHub" height="${badge_height}"/>
+  </a>
+EOF
+fi
 if [[ -n "$gitlab_project_url" ]]; then
   gitlab_project_url="${gitlab_project_url%/}"
   cat >> "$output_file" <<EOF
   <a href="${gitlab_project_url}/-/releases/${tag_name}">
     <img src="https://img.shields.io/badge/Get%20it%20on-GitLab-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white" alt="Get it on GitLab" height="${badge_height}"/>
-  </a>
-EOF
-fi
-if [[ -n "$source_repo" ]]; then
-  cat >> "$output_file" <<EOF
-  <a href="https://github.com/${source_repo}/releases/tag/${tag_name}">
-    <img src="https://img.shields.io/badge/Get%20it%20on-GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Get it on GitHub" height="${badge_height}"/>
   </a>
 EOF
 fi
