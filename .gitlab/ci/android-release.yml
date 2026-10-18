@@ -22,6 +22,9 @@
     MAGISK_OTEL_EXPORT: "1"
     MAGISK_OTEL_SERVICE_NAME: "magisk-ci"
     MAGISK_OTEL_ENDPOINT: "https://136325658.otel.gitlab-o11y.com:14318/v1/traces"
+    # Set to "true" to build an internal/CI variant: runtime-log export stays
+    # available and telemetry is forced on. Public releases must keep it false.
+    MAGISK_IS_CI_BUILD: "false"
   hooks:
     pre_get_sources_script:
       - git config --global http.version "HTTP/1.1"
@@ -112,11 +115,12 @@
         set +a
         MAGISK_ANDROID_RELEASE_VERSION_ARGS="-PversionName=${MAGISK_PLAY_VERSION_NAME:-} -PversionCode=${MAGISK_PLAY_VERSION_CODE:-}"
       fi
+      MAGISK_ANDROID_RELEASE_CI_BUILD_ARGS="-PisCiBuild=${MAGISK_IS_CI_BUILD:-false}"
       KEYSTORE_FILE="$keystore_path" \
       STORE_PASSWORD="$STORE_PASSWORD" \
       KEY_ALIAS="$KEY_ALIAS" \
       KEY_PASSWORD="$KEY_PASSWORD" \
-        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_VERSION_ARGS $MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS $MAGISK_ANDROID_RELEASE_APK_TASKS
+        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_VERSION_ARGS $MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS $MAGISK_ANDROID_RELEASE_CI_BUILD_ARGS $MAGISK_ANDROID_RELEASE_APK_TASKS
       chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/validate_android_apk_signatures.sh"
       MAGISK_ANDROID_RELEASE_APK_ROOTS="${MAGISK_ANDROID_RELEASE_APK_ROOTS:-app/build/outputs/apk}" \
         bash "$MAGISK_CI_TOOLKIT_DIR/release/validate_android_apk_signatures.sh"
@@ -128,6 +132,8 @@
       - "*/build/outputs/apk/**/release/*.apk"
       - "*/build/outputs/mapping/**/mapping.txt"
       - "*/build/outputs/native-debug-symbols/**/*.zip"
+      - "*/build/test-results/**"
+      - "*/build/reports/tests/**"
       - play-release.env
 
 .magisk_android_release_aab:
@@ -173,11 +179,12 @@
         set +a
         MAGISK_ANDROID_RELEASE_VERSION_ARGS="-PversionName=${MAGISK_PLAY_VERSION_NAME:-} -PversionCode=${MAGISK_PLAY_VERSION_CODE:-}"
       fi
+      MAGISK_ANDROID_RELEASE_CI_BUILD_ARGS="-PisCiBuild=${MAGISK_IS_CI_BUILD:-false}"
       KEYSTORE_FILE="$keystore_path" \
       STORE_PASSWORD="$STORE_PASSWORD" \
       KEY_ALIAS="$KEY_ALIAS" \
       KEY_PASSWORD="$KEY_PASSWORD" \
-        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_VERSION_ARGS $MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS $MAGISK_ANDROID_RELEASE_AAB_TASKS
+        bash "$MAGISK_CI_TOOLKIT_DIR/gradle/run_gradle_with_retry.sh" $MAGISK_GRADLE_ARGS $MAGISK_ANDROID_RELEASE_VERSION_ARGS $MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS $MAGISK_ANDROID_RELEASE_CI_BUILD_ARGS $MAGISK_ANDROID_RELEASE_AAB_TASKS
   artifacts:
     name: "android-release-bundle-$CI_COMMIT_TAG"
     when: always
