@@ -14,7 +14,7 @@
     - when: never
 
 .magisk_linux_base:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.1"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.2"
   variables:
     GET_SOURCES_ATTEMPTS: "3"
     MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
@@ -30,7 +30,7 @@
     - |
       set -euo pipefail
       # All essential tools (bash, ca-certificates, curl, git, jq, openssl,
-      # python3, gh) are pre-baked into utility:3.24.1. Zero runtime package installation
+      # python3, gh) are pre-baked into utility:3.24.2. Zero runtime package installation
       # runtime overhead.
       if [[ -f scripts/resolve_ci_toolkit.sh ]]; then
         chmod +x scripts/resolve_ci_toolkit.sh
@@ -436,11 +436,11 @@
       fi
       echo "Xposed-Modules-Repo release tag: ${modules_release_tag} (pipeline tag ${CI_COMMIT_TAG})"
 
-      # gh is pre-baked into utility:3.24.1 as a static musl-compatible binary
+      # gh is pre-baked into utility:3.24.2 as a static musl-compatible binary
       # (Alpine repos never packaged gh; the old Debian apt path — mirrors,
       # keyring, sources.list — is gone with the Debian-only tooling).
       command -v gh >/dev/null 2>&1 || {
-        echo "ERROR: gh missing from utility image; rebuild utility:3.24.1" >&2
+        echo "ERROR: gh missing from utility image; rebuild utility:3.24.2" >&2
         exit 1
       }
 
@@ -588,11 +588,11 @@
       fi
       echo "Publishing ${#apk_files[@]} asset(s) to ${github_repo}"
 
-      # gh is pre-baked into utility:3.24.1 as a static musl-compatible binary
+      # gh is pre-baked into utility:3.24.2 as a static musl-compatible binary
       # (Alpine repos never packaged gh; the old Debian apt path — mirrors,
       # keyring, sources.list — is gone with the Debian-only tooling).
       command -v gh >/dev/null 2>&1 || {
-        echo "ERROR: gh missing from utility image; rebuild utility:3.24.1" >&2
+        echo "ERROR: gh missing from utility image; rebuild utility:3.24.2" >&2
         exit 1
       }
 

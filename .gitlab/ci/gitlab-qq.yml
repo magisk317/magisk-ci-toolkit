@@ -11,7 +11,7 @@
 # Project identity and commit/pipeline metadata come from GitLab predefined vars.
 
 .magisk_gitlab_qq_base:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.1"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.2"
   stage: notify
   allow_failure: true
   variables:

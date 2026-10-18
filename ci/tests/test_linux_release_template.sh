@@ -16,10 +16,10 @@ extract_template() {
 }
 
 linux_base="$(extract_template '.magisk_linux_base')"
-[[ "$linux_base" == *'utility:3.24.1'* ]] || fail "lightweight utility image is missing"
+[[ "$linux_base" == *'utility:3.24.2'* ]] || fail "lightweight utility image is missing"
 [[ "$linux_base" == *'scripts/resolve_ci_toolkit.sh'* ]] || fail "toolkit checkout is missing"
 
-# The release templates run on Alpine (utility:3.24.1): Debian-only tooling
+# The release templates run on Alpine (utility:3.24.2): Debian-only tooling
 # must never come back. gh/python3/openssl are pre-baked into the image.
 [[ "$(grep -c 'apt-get' "$template")" -eq 0 ]] || fail "release template must not shell out to apt-get"
 
