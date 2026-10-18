@@ -14,7 +14,7 @@
     - when: never
 
 .magisk_linux_base:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.1"
   variables:
     GET_SOURCES_ATTEMPTS: "3"
     MAGISK_CI_TOOLKIT_DIR: "$CI_PROJECT_DIR/.magisk-ci-toolkit"
@@ -29,8 +29,9 @@
   before_script:
     - |
       set -euo pipefail
-      # All essential tools (bash, ca-certificates, curl, git, jq, openssl, python3)
-      # are pre-baked into utility:3.24. Zero apt-get / apk runtime overhead.
+      # All essential tools (bash, ca-certificates, curl, git, jq, openssl,
+      # python3, gh) are pre-baked into utility:3.24.1. Zero runtime package installation
+      # runtime overhead.
       if [[ -f scripts/resolve_ci_toolkit.sh ]]; then
         chmod +x scripts/resolve_ci_toolkit.sh
         bash scripts/resolve_ci_toolkit.sh >/dev/null || true
@@ -300,50 +301,21 @@
         fi
       done
 
-      # Fastlane/Ruby require an explicit UTF-8 locale in the slim image.
+      # publish_play.py writes release notes text, so pin an explicit UTF-8
+      # locale; the utility image is Alpine and ships python3/openssl/curl
+      # pre-baked, so no runtime package installation is needed at all.
       export LANG=C.UTF-8
       export LC_ALL=C.UTF-8
       export LANGUAGE=C.UTF-8
-      export FASTLANE_OPT_OUT_USAGE=1
-      export DEBIAN_FRONTEND=noninteractive
-      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
-      if [[ "$use_mirror" == "true" ]]; then
-        sed -i \
-          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
-          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
-          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
-          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
-          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
-          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-      fi
-      if [[ "$use_mirror" == "true" ]]; then
-        if ! apt-get -o APT::Update::Error-Mode=any update; then
-          echo "Mirror apt-get update failed, falling back to official sources" >&2
-          sed -i \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          apt-get -o APT::Update::Error-Mode=any update
-        fi
-      else
-        apt-get -o APT::Update::Error-Mode=any update
-      fi
-      apt-get install -y --no-install-recommends build-essential ruby ruby-dev
-      rm -rf /var/lib/apt/lists/*
-      gem_user_bin="$(ruby -r rubygems -e 'print Gem.user_dir')/bin"
-      export PATH="$gem_user_bin:$PATH"
-      gem install --user-install fastlane --no-document
 
-      cmd=(
-        fastlane supply
+      publish_cmd=(
+        python3 "$MAGISK_CI_TOOLKIT_DIR/release/publish_play.py"
+        --credentials "$publisher_credentials_file"
+        --package-name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME"
         --aab "$aab_file"
-        --package_name "$MAGISK_ANDROID_RELEASE_PACKAGE_NAME"
         --track "$release_track"
-        --release_status "completed"
-        --json_key "$publisher_credentials_file"
-        --skip_upload_images true
-        --skip_upload_screenshots true
+        --version-code "$MAGISK_PLAY_VERSION_CODE"
+        --version-name "$MAGISK_PLAY_VERSION_NAME"
       )
       if [[ -n "$metadata_path" ]]; then
         metadata_staging_dir="$(mktemp -d)"
@@ -363,23 +335,16 @@
             fi
           done < <(find "$metadata_staging_dir" -type f -path '*/changelogs/*.txt' | sort -u)
         fi
-        cmd+=(--metadata_path "$metadata_staging_dir" --skip_upload_metadata false)
-      else
-        cmd+=(--skip_upload_metadata true)
+        publish_cmd+=(--metadata-dir "$metadata_staging_dir")
       fi
-      if [ -n "$mapping_file" ] && [ -n "$symbols_file" ]; then
-        cmd+=(--mapping_paths "${mapping_file},${symbols_file}")
-      elif [ -n "$mapping_file" ]; then
-        cmd+=(--mapping "$mapping_file")
-      elif [ -n "$symbols_file" ]; then
-        cmd+=(--mapping_paths "$symbols_file")
+      if [[ -n "$mapping_file" ]]; then
+        publish_cmd+=(--mapping "$mapping_file")
+      fi
+      if [[ -n "$symbols_file" ]]; then
+        publish_cmd+=(--native-symbols "$symbols_file")
       fi
 
-      FASTLANE_SKIP_UPDATE_CHECK=1 \
-      FASTLANE_DISABLE_COLORS=1 \
-      FASTLANE_OPT_OUT_USAGE=1 \
-      CI=true \
-        "${cmd[@]}"
+      "${publish_cmd[@]}"
 
       release_env_file="${MAGISK_RELEASE_ENV_FILE:-play-release-status.env}"
       {
@@ -471,40 +436,13 @@
       fi
       echo "Xposed-Modules-Repo release tag: ${modules_release_tag} (pipeline tag ${CI_COMMIT_TAG})"
 
-      install -d -m 0755 /etc/apt/keyrings
-      export DEBIAN_FRONTEND=noninteractive
-      use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
-      if [[ "$use_mirror" == "true" ]]; then
-        sed -i \
-          -e 's#http://deb.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
-          -e 's#http://security.debian.org/debian-security#https://mirrors.tuna.tsinghua.edu.cn/debian-security#g' \
-          -e 's#http://deb.debian.org/debian#https://mirrors.tuna.tsinghua.edu.cn/debian#g' \
-          -e 's#http://archive.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
-          -e 's#http://security.ubuntu.com/ubuntu#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#g' \
-          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-      fi
-      if [[ "$use_mirror" == "true" ]]; then
-        if ! apt-get -o APT::Update::Error-Mode=any update; then
-          echo "Mirror apt-get update failed, falling back to official sources" >&2
-          sed -i \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian-security#http://deb.debian.org/debian-security#g' \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/debian#http://deb.debian.org/debian#g' \
-            -e 's#https://mirrors.tuna.tsinghua.edu.cn/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          apt-get -o APT::Update::Error-Mode=any update
-        fi
-      else
-        apt-get -o APT::Update::Error-Mode=any update
-      fi
-      apt-get install -y --no-install-recommends gpg
-      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
-      chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list
-      apt-get -o APT::Update::Error-Mode=any update
-      apt-get install -y --no-install-recommends gh
-      rm -rf /var/lib/apt/lists/*
+      # gh is pre-baked into utility:3.24.1 as a static musl-compatible binary
+      # (Alpine repos never packaged gh; the old Debian apt path — mirrors,
+      # keyring, sources.list — is gone with the Debian-only tooling).
+      command -v gh >/dev/null 2>&1 || {
+        echo "ERROR: gh missing from utility image; rebuild utility:3.24.1" >&2
+        exit 1
+      }
 
       chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh"
       # Keep the channel badge row identical on every release surface: the
@@ -650,18 +588,13 @@
       fi
       echo "Publishing ${#apk_files[@]} asset(s) to ${github_repo}"
 
-      install -d -m 0755 /etc/apt/keyrings
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get -o APT::Update::Error-Mode=any update
-      apt-get install -y --no-install-recommends curl ca-certificates gpg
-      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
-      chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list
-      apt-get -o APT::Update::Error-Mode=any update
-      apt-get install -y --no-install-recommends gh
-      rm -rf /var/lib/apt/lists/*
+      # gh is pre-baked into utility:3.24.1 as a static musl-compatible binary
+      # (Alpine repos never packaged gh; the old Debian apt path — mirrors,
+      # keyring, sources.list — is gone with the Debian-only tooling).
+      command -v gh >/dev/null 2>&1 || {
+        echo "ERROR: gh missing from utility image; rebuild utility:3.24.1" >&2
+        exit 1
+      }
 
       chmod +x "$MAGISK_CI_TOOLKIT_DIR/release/release_notes.sh"
       export GH_TOKEN="$GITHUB_RELEASE_TOKEN"

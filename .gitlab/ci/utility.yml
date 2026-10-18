@@ -17,4 +17,4 @@
 # file, ...) spells out its own before_script — a job-level before_script
 # REPLACES this one, so list the full set in that case.
 .magisk_utility_base:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.1"

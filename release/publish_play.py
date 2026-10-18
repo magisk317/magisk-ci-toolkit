@@ -102,6 +102,7 @@ def main():
     parser.add_argument("--version-code", type=int, required=True, help="Version code of the AAB")
     parser.add_argument("--version-name", required=True, help="Version name of the release")
     parser.add_argument("--mapping", help="Optional path to Proguard mapping.txt")
+    parser.add_argument("--native-symbols", help="Optional path to native-debug-symbols.zip")
     parser.add_argument("--metadata-dir", help="Optional path to fastlane/metadata directory")
     args = parser.parse_args()
 
@@ -160,6 +161,25 @@ def main():
                 content_type="application/octet-stream",
             )
             print("Mapping file uploaded successfully.")
+
+        # 2b. Upload native debug symbols if present
+        if args.native_symbols and os.path.isfile(args.native_symbols):
+            sym_size = os.path.getsize(args.native_symbols)
+            print(f"Uploading native-debug-symbols.zip ({sym_size / 1024:.1f} KB)...")
+            sym_upload_url = (
+                f"https://androidpublisher.googleapis.com/upload/androidpublisher/v3/applications/"
+                f"{args.package_name}/edits/{edit_id}/apks/{uploaded_version_code}/deobfuscationFiles/nativeDebugSymbols?uploadType=media"
+            )
+            with open(args.native_symbols, "rb") as f:
+                sym_bytes = f.read()
+            api_request(
+                sym_upload_url,
+                access_token,
+                method="POST",
+                data=sym_bytes,
+                content_type="application/octet-stream",
+            )
+            print("Native debug symbols uploaded successfully.")
 
         # 3. Read Release Notes if metadata dir is present
         release_notes = []
