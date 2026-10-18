@@ -1,0 +1,43 @@
+# Reusable GitLab CI template: scheduled / manual README badge sync.
+#
+# Consumer usage (in the consumer .gitlab-ci.yml):
+#
+#   sync:readme-badges:
+#     extends:
+#       - .magisk_utility_base      # image + before_script (utility.yml)
+#       - .magisk_readme_badges     # this template
+#     tags:
+#       - $<REPO>_GITLAB_LINUX_AMD64_RUNNER_TAG
+#
+# The job rewrites the marker-delimited badge blocks from
+# gradle/libs.versions.toml + gradle-wrapper.properties (tech row) and
+# config/readme-badges.conf (platform row), then pushes the result back to
+# the current branch with the CI job token. Badge drift is additionally
+# enforced at release time by the release guard (check_readme_badges), so a
+# stale README can never reach a tag.
+#
+# GitHub Actions used to host the equivalent workflow; with GitHub reduced
+# to a downstream sync mirror this is the GitLab-side replacement.
+
+.magisk_readme_badges:
+  stage: maintenance
+  needs: []
+  interruptible: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - |
+      set -euo pipefail
+      TOOLKIT_DIR="$(scripts/resolve_ci_toolkit.sh)"
+      bash "${TOOLKIT_DIR}/codegen/sync_readme_badges.sh" "${CI_PROJECT_DIR}" --write
+      if [[ -z "$(git status --porcelain README.md README-EN.md)" ]]; then
+        echo "No README badge updates"
+        exit 0
+      fi
+      git config user.name "GitLab CI"
+      git config user.email "gitlab-ci@magisk3171"
+      git add README.md README-EN.md
+      git commit -m "docs(readme): sync version badges"
+      git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/${CI_PROJECT_PATH}.git"
+      git push origin "HEAD:${CI_COMMIT_BRANCH}"

@@ -236,6 +236,28 @@ check_fastlane_metadata() {
   return $fail
 }
 
+# README badge blocks must match gradle/libs.versions.toml +
+# gradle-wrapper.properties (tech row) and config/readme-badges.conf
+# (platform row). The driver is shared with the GitLab sync job, so the
+# release guard and CI can never disagree about what "in sync" means.
+check_readme_badges() {
+  local root_dir="$1"
+  local toolkit_dir script out
+  toolkit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  script="${toolkit_dir}/codegen/sync_readme_badges.sh"
+  if [[ ! -f "$script" ]]; then
+    echo "FAIL: badge sync driver not found: $script" >&2
+    return 1
+  fi
+  if out="$(bash "$script" --check "$root_dir" 2>&1)"; then
+    echo "PASS: README badges in sync with version catalog"
+    return 0
+  fi
+  printf '%s\n' "$out" >&2
+  echo "FAIL: README badge blocks are stale (run the sync driver with --write)" >&2
+  return 1
+}
+
 # Main entry point — call this from your repo's wrapper script
 check_release_guard() {
   local root_dir="${1:-.}"
@@ -250,6 +272,7 @@ check_release_guard() {
   check_version_extraction "$root_dir" || fail=1
   check_commit_subjects "$root_dir" "$allow_non_ascii" || fail=1
   check_changelog_section "$root_dir" "$VERSION_NAME" || fail=1
+  check_readme_badges "$root_dir" || fail=1
   check_tag_matches_version "$tag_name" "$VERSION_NAME" || fail=1
 
   if (( fail != 0 )); then

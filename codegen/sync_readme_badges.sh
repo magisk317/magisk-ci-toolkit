@@ -2,161 +2,173 @@
 set -euo pipefail
 
 # ============================================================================
-# Sync README Badges — Template Version
-# Source this file and call sync_badges with appropriate variables set.
+# sync_readme_badges.sh — shared README badge driver (magisk-ci-toolkit)
+#
+# Single implementation for every consumer repo. Tech badges are derived from
+# the consumer's gradle/libs.versions.toml + gradle-wrapper.properties; the
+# platform badge row is derived from config/readme-badges.conf. Marker blocks
+# in README.md / README-EN.md are rewritten in place.
+#
+# Usage:
+#   sync_readme_badges.sh --check <repo-root>   # exit 1 when a README is stale
+#   sync_readme_badges.sh --write <repo-root>   # rewrite stale READMEs
+#   sync_readme_badges.sh <repo-root>           # alias for --write
+#
+# Config: <repo-root>/config/readme-badges.conf (shell-sourceable)
+#   PLATFORM=gitlab                              # only flavour today
+#   PROJECT_PATH=magisk3171/XposedSmsCode        # GitLab project path
+#   DEFAULT_BRANCH=beta                          # pipeline-status branch
+#   LICENSE_ID=GPL-3.0                           # optional, default GPL-3.0
+#
+# Consumers: xinyi-relay, XposedSmsCode, MiPushFramework.
+#
+# Called by:
+#   - release guard  (release/check_release_guard.sh :: check_readme_badges)
+#   - GitLab CI      (.gitlab/ci/readme-badges.yml :: sync:readme-badges)
+#   - manual runs    (bash <toolkit>/codegen/sync_readme_badges.sh <repo>)
 # ============================================================================
 
-# Default root depth (2 for scripts/codegen/, 1 for scripts/)
-MAGISK_ROOT_DEPTH="${MAGISK_ROOT_DEPTH:-2}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/badges.sh"
 
-# Extract a TOML value from libs.versions.toml
-extract_toml_value() {
-  local key="$1"
-  local file="$2"
-  sed -nE "s/^${key}[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\1/p" "$file" | head -n1
-}
+MODE="write"
+REPO_ROOT=""
 
-# Escape badge value
-badge_escape() {
-  local raw="$1"
-  raw="${raw//-/--}"
-  raw="${raw// /_}"
-  printf '%s' "$raw"
-}
-
-# Generate a shield.io badge URL
-generate_badge() {
-  local label="$1"
-  local value="$2"
-  local color="$3"
-  local logo="${4:-}"
-  local logo_color="${5:-}"
-
-  local escaped_value
-  escaped_value="$(badge_escape "$value")"
-
-  local url="https://img.shields.io/badge/${label}-${escaped_value}-${color}"
-  if [[ -n "$logo" ]]; then
-    url="${url}?logo=${logo}"
-    if [[ -n "$logo_color" ]]; then
-      url="${url}&logoColor=${logo_color}"
-    fi
-  fi
-
-  printf '![%s](%s)' "$label" "$url"
-}
-
-# Core sync function — call this from your repo's wrapper script
-sync_badges() {
-  local root_dir="${1:-.}"
-  local readme_file="${root_dir}/README.md"
-  local toml_file="${root_dir}/gradle/libs.versions.toml"
-  local wrapper_file="${root_dir}/gradle/wrapper/gradle-wrapper.properties"
-
-  if [[ ! -f "$readme_file" ]]; then
-    echo "ERROR: README.md not found: $readme_file" >&2
-    return 1
-  fi
-
-  if [[ ! -f "$toml_file" ]]; then
-    echo "ERROR: libs.versions.toml not found: $toml_file" >&2
-    return 1
-  fi
-
-  # Read versions from TOML
-  local kotlin_version
-  kotlin_version="$(extract_toml_value "kotlin" "$toml_file")"
-  local agp_version
-  agp_version="$(extract_toml_value "agp" "$toml_file")"
-  local min_sdk
-  min_sdk="$(extract_toml_value "minSdk" "$toml_file")"
-  local target_sdk
-  target_sdk="$(extract_toml_value "targetSdk" "$toml_file")"
-  local java_version
-  java_version="$(extract_toml_value "java" "$toml_file")"
-
-  # Read Gradle version
-  local gradle_version=""
-  if [[ -f "$wrapper_file" ]]; then
-    gradle_version="$(sed -nE 's/^distributionUrl=.*gradle-([0-9A-Za-z.-]+)-(bin|all)\.zip/\1/p' "$wrapper_file")"
-  fi
-
-  # Generate badges (override these in your wrapper if needed)
-  local badges=()
-
-  if [[ -n "$kotlin_version" ]]; then
-    badges+=("$(generate_badge "Kotlin" "$kotlin_version" "7F52FF" "kotlin" "white")")
-  fi
-
-  if [[ -n "$java_version" ]]; then
-    badges+=("$(generate_badge "Java" "${java_version}+" "E76F00" "openjdk" "white")")
-  fi
-
-  if [[ -n "$gradle_version" ]]; then
-    badges+=("$(generate_badge "Gradle" "$gradle_version" "02303A" "gradle" "white")")
-  fi
-
-  if [[ -n "$min_sdk" && -n "$target_sdk" ]]; then
-    badges+=("$(generate_badge "Android" "${min_sdk}+ / target ${target_sdk}" "3DDC84" "android" "white")")
-  fi
-
-  if [[ -n "$agp_version" ]]; then
-    badges+=("$(generate_badge "AGP" "$agp_version" "3DDC84" "gradle" "white")")
-  fi
-
-  # Add custom badges (set BADGES array in your wrapper)
-  if [[ -v CUSTOM_BADGES[@] ]]; then
-    badges+=("${CUSTOM_BADGES[@]}")
-  fi
-
-  # Update README
-  local tmp_file
-  tmp_file="$(mktemp)"
-
-  # Find the badges section and replace it
-  local in_badges=0
-  local badge_start_line=0
-  local badge_end_line=0
-  local line_num=0
-
-  while IFS= read -r line; do
-    line_num=$((line_num + 1))
-    if [[ "$line" =~ ^!\[.*\]\(https://img\.shields\.io/ ]]; then
-      if [[ $badge_start_line -eq 0 ]]; then
-        badge_start_line=$line_num
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE="check" ;;
+    --write) MODE="write" ;;
+    -h|--help)
+      sed -n '2,26p' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
+    *)
+      if [[ -n "$REPO_ROOT" ]]; then
+        echo "ERROR: unexpected argument: $1" >&2
+        exit 2
       fi
-      badge_end_line=$line_num
-    fi
-  done < "$readme_file"
+      REPO_ROOT="$1"
+      ;;
+  esac
+  shift
+done
 
-  if [[ $badge_start_line -eq 0 ]]; then
-    echo "WARN: No badge lines found in README.md" >&2
-    rm -f "$tmp_file"
-    return 0
+if [[ -z "$REPO_ROOT" ]]; then
+  echo "ERROR: repo root required (usage: $0 --check|--write <repo-root>)" >&2
+  exit 2
+fi
+REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
+
+CONF="${REPO_ROOT}/config/readme-badges.conf"
+if [[ ! -f "$CONF" ]]; then
+  echo "ERROR: missing badge config: ${CONF}" >&2
+  exit 2
+fi
+# shellcheck source=/dev/null
+source "$CONF"
+
+PLATFORM="${PLATFORM:-gitlab}"
+PROJECT_PATH="${PROJECT_PATH:-}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-beta}"
+LICENSE_ID="${LICENSE_ID:-GPL-3.0}"
+if [[ -z "$PROJECT_PATH" ]]; then
+  echo "ERROR: PROJECT_PATH not set in ${CONF}" >&2
+  exit 2
+fi
+
+TOML="${REPO_ROOT}/gradle/libs.versions.toml"
+WRAPPER="${REPO_ROOT}/gradle/wrapper/gradle-wrapper.properties"
+if [[ ! -f "$TOML" ]]; then
+  echo "ERROR: missing ${TOML}" >&2
+  exit 2
+fi
+
+kotlin="$(read_toml_value kotlin "$TOML")"
+java="$(read_toml_value java "$TOML")"
+compose="$(read_toml_value compose-bom-alpha "$TOML")"
+agp="$(read_toml_value agp "$TOML")"
+min_sdk="$(read_toml_value minSdk "$TOML")"
+target_sdk="$(read_toml_value targetSdk "$TOML")"
+xposed="$(read_toml_value libxposed-api "$TOML")"
+gradle_ver="$(read_gradle_version "$WRAPPER")"
+xposed_level="${xposed%%.*}"
+
+missing=()
+[[ -n "$kotlin" ]] || missing+=("kotlin")
+[[ -n "$java" ]] || missing+=("java")
+[[ -n "$compose" ]] || missing+=("compose-bom-alpha")
+[[ -n "$agp" ]] || missing+=("agp")
+[[ -n "$min_sdk" ]] || missing+=("minSdk")
+[[ -n "$target_sdk" ]] || missing+=("targetSdk")
+[[ -n "$xposed" ]] || missing+=("libxposed-api")
+[[ -n "$gradle_ver" ]] || missing+=("gradle wrapper")
+if (( ${#missing[@]} > 0 )); then
+  echo "ERROR: unresolved version keys in ${TOML}: ${missing[*]}" >&2
+  exit 2
+fi
+
+# --- tech stack (identical subset + order across all consumer repos) ---
+tech="$(tech_badge Kotlin "$kotlin" 7F52FF kotlin https://kotlinlang.org)"
+tech="$tech $(tech_badge Java "${java}+" E76F00 openjdk https://openjdk.org)"
+tech="$tech $(tech_badge "Jetpack Compose" "BOM ${compose}" 4285F4 android https://developer.android.com/jetpack/compose)"
+tech="$tech $(tech_badge Gradle "$gradle_ver" 02303A gradle https://gradle.org)"
+tech="$tech $(tech_badge AGP "$agp" 3DDC84 gradle https://developer.android.com/studio/releases/gradle-plugin)"
+tech="$tech $(tech_badge "Min SDK" "$min_sdk" brightgreen android https://developer.android.com/about/versions)"
+tech="$tech $(tech_badge "Target SDK" "$target_sdk" blue android https://developer.android.com/about/versions)"
+tech="$tech $(tech_badge "Xposed API" "$xposed_level" orange '' https://github.com/libxposed/api)"
+tech="$tech $(tech_badge Telegram Group 2CA5E0 telegram https://t.me/+NR2QaQ4dlEgxYmNl)"
+
+# --- platform row ---
+project_enc="${PROJECT_PATH//\//%2F}"
+case "$PLATFORM" in
+  gitlab)
+    plat="$(tech_badge GitLab "$PROJECT_PATH" FC6D26 gitlab "https://gitlab.com/${PROJECT_PATH}")"
+    plat="$plat [![CI](https://img.shields.io/gitlab/pipeline-status/${project_enc}?branch=${DEFAULT_BRANCH}&style=flat-square&logo=gitlab&label=CI)](https://gitlab.com/${PROJECT_PATH}/-/pipelines?ref=${DEFAULT_BRANCH})"
+    plat="$plat [![Latest Release](https://img.shields.io/gitlab/v/release/${project_enc}?include_prereleases&style=flat-square&logo=gitlab)](https://gitlab.com/${PROJECT_PATH}/-/releases)"
+    plat="$plat $(tech_badge License "$LICENSE_ID" blue '' LICENSE)"
+    ;;
+  *)
+    echo "ERROR: unsupported PLATFORM '${PLATFORM}' in ${CONF}" >&2
+    exit 2
+    ;;
+esac
+
+stale=()
+synced=()
+
+sync_one() {
+  local readme="$1"
+  [[ -f "$readme" ]] || return 0
+  if [[ "$MODE" == "check" ]]; then
+    local tmp
+    tmp="$(mktemp -d)"
+    cp "$readme" "${tmp}/README"
+    replace_block "${tmp}/README" platform "$plat" >/dev/null
+    replace_block "${tmp}/README" tech "$tech" >/dev/null
+    if ! cmp -s "$readme" "${tmp}/README"; then
+      stale+=("$(basename "$readme")")
+      diff -u "$readme" "${tmp}/README" | sed 's/^/    /' || true
+    fi
+    rm -rf "$tmp"
+  else
+    replace_block "$readme" platform "$plat" >/dev/null
+    replace_block "$readme" tech "$tech" >/dev/null
+    synced+=("$(basename "$readme")")
   fi
-
-  # Reconstruct README with new badges
-  line_num=0
-  while IFS= read -r line; do
-    line_num=$((line_num + 1))
-    if [[ $line_num -lt $badge_start_line ]]; then
-      echo "$line"
-    elif [[ $line_num -eq $badge_start_line ]]; then
-      printf '%s\n' "${badges[@]}"
-    elif [[ $line_num -gt $badge_end_line ]]; then
-      echo "$line"
-    fi
-  done < "$readme_file" > "$tmp_file"
-
-  mv "$tmp_file" "$readme_file"
-
-  echo "README badges synced from $toml_file"
 }
 
-# If sourced directly (not from a wrapper), run with defaults
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  ROOT_DIR="$(cd "${SCRIPT_DIR}$(printf '/..%.s' $(seq 1 "${MAGISK_ROOT_DEPTH}"))" && pwd)"
+for readme in "${REPO_ROOT}/README.md" "${REPO_ROOT}/README-EN.md"; do
+  sync_one "$readme"
+done
 
-  sync_badges "$ROOT_DIR"
+if [[ "$MODE" == "check" ]]; then
+  if (( ${#stale[@]} > 0 )); then
+    echo "FAIL: README badge blocks out of sync: ${stale[*]}" >&2
+    echo "      fix: bash ${SCRIPT_DIR}/sync_readme_badges.sh ${REPO_ROOT} --write" >&2
+    exit 1
+  fi
+  echo "PASS: README badge blocks in sync (${REPO_ROOT})"
+else
+  echo "README badges synced: ${synced[*]:-none} (${REPO_ROOT})"
 fi

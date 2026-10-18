@@ -9,7 +9,7 @@ This toolkit provides modular, reusable scripts for:
 - **Security**: Dependency force management, Dependabot alert reconciliation, security fix janitor
 - **Release**: Release guards, tag management, release reference parsing
 - **CI**: GitHub composite actions and reusable workflows
-- **Codegen**: README badge synchronization
+- **Codegen**: README badge synchronization (driver, release-guard check, GitLab sync job)
 
 Hosting ownership and a future GitLab-to-GitHub cutover are documented in
 [`docs/hosting-cutover.md`](docs/hosting-cutover.md).
@@ -540,7 +540,30 @@ The target README must contain matching marker lines:
 
 #### sync_readme_badges.sh
 
-Template for syncing README badges from version files.
+Shared README badge driver for all consumer repos. Reads the tech badge
+values from the consumer's `gradle/libs.versions.toml` +
+`gradle/wrapper/gradle-wrapper.properties` and the platform row from the
+consumer's `config/readme-badges.conf` (`PLATFORM` / `PROJECT_PATH` /
+`DEFAULT_BRANCH` / `LICENSE_ID`), then rewrites the `platform` and `tech`
+marker blocks in `README.md` / `README-EN.md`:
+
+```bash
+# manual sync
+bash .magisk-ci-toolkit/codegen/sync_readme_badges.sh . --write
+# read-only check (used by the release guard)
+bash .magisk-ci-toolkit/codegen/sync_readme_badges.sh . --check
+```
+
+The platform flavour is `gitlab` (repo badge, pipeline status, latest
+release, license); GitHub-hosted badges were retired when GitHub was reduced
+to a downstream sync mirror.
+
+Wired into:
+
+- `release/check_release_guard.sh` → `check_readme_badges()` (also called by
+  the `check_release_guard()` aggregate), so a release with stale badges fails.
+- `.gitlab/ci/readme-badges.yml` → `sync:readme-badges` job (schedule / web)
+  that syncs and pushes back with the CI job token.
 
 ## Local Validation
 
