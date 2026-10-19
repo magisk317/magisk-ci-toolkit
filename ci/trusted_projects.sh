@@ -39,6 +39,26 @@ trusted_target_branch() {
   esac
 }
 
+# Every trusted upstream path, in a stable order, for sweeps that must visit
+# each project (ci/reconcile_trusted_renovate_mrs.sh). Keep this in sync with
+# the two case statements above: the reconcile test asserts that every path
+# listed here resolves an ID and a target branch, and that none of them is
+# the controller project itself.
+trusted_project_paths() {
+  printf '%s\n' \
+    "magisk3171/shared/magisk-build-logic" \
+    "magisk3171/MiPushFramework" \
+    "magisk3171/XposedSmsCode" \
+    "magisk3171/xinyi-relay" \
+    "magisk3171/SerialBridge" \
+    "magisk3171/napgram-ecosystem/NapGram" \
+    "magisk3171/napgram-ecosystem/napgram-ui-dist" \
+    "magisk3171/MiPushConfigurations" \
+    "magisk3171/MiPushZygisk" \
+    "magisk3171/napgram-ecosystem/NapLink" \
+    "magisk3171/android-host-tools-arm64"
+}
+
 trusted_project_is_allowed() {
   trusted_project_id "$1" >/dev/null
 }

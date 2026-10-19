@@ -299,5 +299,10 @@ for ((attempt = 1; attempt <= merge_attempts; attempt++)); do
 done
 
 fetch_merge_request
-detailed_status="$(jq -r '.detailed_merge_status // .merge_status // "unknown"' "$mr_file")"
-fail "merge request !${merge_request_iid} did not become mergeable after ${merge_attempts} attempts (status: ${detailed_status})"
+# Report both status fields: detailed_merge_status alone claimed "mergeable"
+# for build-logic !21 on 2026-10-19 while every merge PUT answered 422 inside
+# GitLab's post-rebase recheck window, which sent the failure hunt in the
+# wrong direction. merge_status is the coarse gate the merge endpoint applies.
+merge_status_now="$(jq -r '.merge_status // "unknown"' "$mr_file")"
+detailed_status_now="$(jq -r '.detailed_merge_status // "unknown"' "$mr_file")"
+fail "merge request !${merge_request_iid} did not become mergeable after ${merge_attempts} attempts (merge_status: ${merge_status_now}, detailed_merge_status: ${detailed_status_now})"
