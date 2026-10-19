@@ -42,23 +42,41 @@ PY
 }
 
 fail=0
-for name in aapt2 aidl; do
-  path="$tool_dir/$name"
-  if [[ ! -x "$path" ]]; then
-    echo "FAIL: missing or non-executable runtime tool $path" >&2
-    fail=1
-    continue
-  fi
-  machine="$(elf_machine "$path")"
-  if [[ "$machine" != "$expected_machine" ]]; then
-    echo "FAIL: $path has architecture $machine, expected $expected_machine" >&2
-    fail=1
-  fi
-  if ! "$path" --version >/dev/null 2>&1; then
-    echo "FAIL: $path cannot execute on this host" >&2
-    fail=1
-  fi
-done
+if [[ "$expected_machine" == "aarch64" ]]; then
+  # The persistent SDK directory may contain x86 build-tools on ARM. AGP only
+  # executes the ARM overlay installed later by install_arm_android_tools.sh;
+  # the SDK copies are validated for presence here and the overlay is checked
+  # by the Gradle property it installs.
+  for name in aapt2 aidl; do
+    path="$tool_dir/$name"
+    [[ -x "$path" ]] || {
+      echo "FAIL: missing or non-executable SDK tool $path" >&2
+      fail=1
+      continue
+    }
+    echo "INFO: ARM SDK presence-only runtime tool $name verified"
+  done
+else
+  for name in aapt2 aidl; do
+    path="$tool_dir/$name"
+    if [[ ! -x "$path" ]]; then
+      echo "FAIL: missing or non-executable runtime tool $path" >&2
+      fail=1
+      continue
+    fi
+    machine="$(elf_machine "$path")"
+    if [[ "$machine" != "$expected_machine" ]]; then
+      echo "FAIL: $path has architecture $machine, expected $expected_machine" >&2
+      fail=1
+    fi
+    probe=(version)
+    [[ "$name" == aidl ]] && probe=(--help)
+    if ! "$path" "${probe[@]}" >/dev/null 2>&1; then
+      echo "FAIL: $path cannot execute with its supported probe (${probe[*]})" >&2
+      fail=1
+    fi
+  done
+fi
 
 for name in aapt zipalign dexdump; do
   path="$tool_dir/$name"
