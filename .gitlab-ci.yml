@@ -133,6 +133,17 @@ renovate:self-automerge:
   stage: maintenance
   interruptible: false
   needs: []
+  # One dropped TLS connection during get_sources must not silently skip the
+  # merge of this repository's own Renovate MRs for a day (the api_retry
+  # ladder protects script-internal API calls, not the runner's git fetch).
+  retry:
+    max: 2
+  # Pin to the arm64 runner: it egresses directly to gitlab.com (Oracle host,
+  # overseas) instead of through the shared clash proxy the amd64 runner
+  # depends on, whose transient TLS errors killed controller jobs on
+  # 2026-10-14 and 2026-10-18.
+  tags:
+    - magisk-arm64-linux
   script:
     - bash ci/auto_merge_self_renovate_mrs.sh
   rules:
@@ -146,6 +157,16 @@ cancel:older:mr:pipelines:
   extends: .magisk_utility_base
   stage: control
   interruptible: true
+  # The controller merge/cleanup must survive transient TLS drops between the
+  # runner and gitlab.com: on 2026-10-18 a dropped connection during this
+  # job's git fetch killed it before any script ran, leaving the upstream
+  # Renovate MR unmerged and timing out the upstream serial loop. The ci
+  # scripts already retry API calls via api_retry.sh; get_sources does not.
+  retry:
+    max: 2
+  # Pin to the arm64 runner (direct Oracle egress; see renovate:self-automerge).
+  tags:
+    - magisk-arm64-linux
   rules:
     - if: '$CI_PIPELINE_SOURCE == "pipeline"'
     - when: never
