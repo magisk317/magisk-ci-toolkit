@@ -76,6 +76,8 @@ shell:test:
       gradle/tests/test_run_gradle_with_retry.sh
       release/tests/test_release_notes.sh
       release/tests/test_modules_repo_tag.sh
+      release/tests/test_release_tag.sh
+      release/tests/test_check_release_guard.sh
       ci/tests/test_trusted_projects.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
     - bash ci/tests/test_cancel_older_renovate_pipelines.sh
@@ -90,6 +92,8 @@ shell:test:
     - bash gradle/tests/test_run_gradle_with_retry.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_modules_repo_tag.sh
+    - bash release/tests/test_release_tag.sh
+    - bash release/tests/test_check_release_guard.sh
     - bash ci/tests/test_trusted_projects.sh
 
 # Self-Renovate: run the shared serial orchestrator against this repository on

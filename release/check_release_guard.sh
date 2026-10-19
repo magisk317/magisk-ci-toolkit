@@ -217,8 +217,11 @@ check_whatsnew_locales() {
   local root_dir="$1"
   local version_name="$2"
   local required_locales=("${@:3}")
-  local max_len="${MAX_WHATSNEW_LEN:-500}"
-  local whatsnew_dir="${root_dir}/metadata/android/en-US/changelogs"
+  local max_len="${MAGISK_RELEASE_WHATSNEW_MAX_LENGTH:-${MAX_WHATSNEW_LEN:-500}}"
+  # Honour the policy-declared directory. The previous hard-coded
+  # metadata/android/en-US/changelogs path made this check dead code for every
+  # consumer — all of them keep the files under distribution/whatsnew.
+  local whatsnew_dir="${root_dir}/${MAGISK_RELEASE_WHATSNEW_DIRECTORY:-distribution/whatsnew}"
 
   if [[ ! -d "$whatsnew_dir" ]]; then
     echo "FAIL: missing whatsnew directory ($whatsnew_dir)"
@@ -253,7 +256,7 @@ check_whatsnew_locales() {
 check_fastlane_metadata() {
   local root_dir="$1"
   local required_locales=("${@:2}")
-  local min_screenshots="${FASTLANE_MIN_SCREENSHOTS:-1}"
+  local min_screenshots="${MAGISK_RELEASE_FASTLANE_MIN_SCREENSHOTS:-${FASTLANE_MIN_SCREENSHOTS:-1}}"
   local fastlane_dir="${root_dir}/fastlane/metadata/android"
 
   if [[ ! -d "$fastlane_dir" ]]; then
@@ -314,8 +317,13 @@ validate_release_policy() {
     echo "FAIL: release policy missing: $policy_file" >&2
     return 1
   }
-  eval "$(python3 - "$policy_file" <<'PY'
+  # Capture first, then eval: `eval "$(python3 ...)"` would eval an empty
+  # string when the policy is malformed and return 0, silently disabling every
+  # policy-driven check.
+  local policy_env
+  if ! policy_env="$(python3 - "$policy_file" <<'PY'
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -334,6 +342,16 @@ for key in ("version_file", "changelog_file"):
 for key in required - {"version_file", "changelog_file"}:
     if not isinstance(data[key], bool):
         raise SystemExit(f"release policy {key} must be boolean")
+checks = data.get("project_checks", [])
+if not isinstance(checks, list) or any(not isinstance(item, str) or not item.strip() for item in checks):
+    raise SystemExit("release policy project_checks must be a list of non-empty strings")
+# These names are dispatched as shell function / script names, so refuse
+# anything that is not a plain identifier before it reaches the shell.
+project_check_names = [item.strip() for item in checks]
+for name in project_check_names:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise SystemExit(f"release policy project_checks entry is not a shell identifier: {name}")
+print("MAGISK_RELEASE_PROJECT_CHECKS=" + shlex.quote(" ".join(project_check_names)))
 print("MAGISK_RELEASE_VERSION_FILE=" + shlex.quote(data["version_file"]))
 print("MAGISK_RELEASE_CHANGELOG_FILE=" + shlex.quote(data["changelog_file"]))
 for key in ("require_changelog", "require_versioncode_increment", "require_readme_badges", "require_tag_match"):
@@ -351,17 +369,92 @@ if isinstance(data.get("fastlane_min_screenshots"), int):
 if isinstance(data.get("whatsnew_directory"), str):
     print("MAGISK_RELEASE_WHATSNEW_DIRECTORY=" + shlex.quote(data["whatsnew_directory"]))
 PY
-)"
+)"; then
+    return 1
+  fi
+
+  # Optional keys are exported, so clear them first: otherwise a value from an
+  # earlier policy in the same shell would survive into this one and the
+  # policy file would stop being the sole source of truth.
+  unset MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT \
+    MAGISK_RELEASE_WHATSNEW_LOCALES \
+    MAGISK_RELEASE_WHATSNEW_DIRECTORY \
+    MAGISK_RELEASE_WHATSNEW_MAX_LENGTH \
+    MAGISK_RELEASE_FASTLANE_LOCALES \
+    MAGISK_RELEASE_FASTLANE_MIN_SCREENSHOTS \
+    MAGISK_RELEASE_PROJECT_CHECKS
+
+  eval "$policy_env"
   export MAGISK_RELEASE_POLICY_FILE="$policy_file"
+}
+
+# Dispatch the repo-specific checks declared in release-policy.json.
+#
+# A check name resolves to, in order:
+#   1. a shell function of that name — repo wrappers define their checks as
+#      functions so they inherit the toolkit's helpers (extract_toml_value,
+#      ROOT_DIR-independent paths, ...);
+#   2. a script at <root>/scripts/release/<name>.sh, <root>/scripts/<name>.sh
+#      or <root>/scripts/ci/<name>.sh — for projects that already ship the
+#      check as a standalone executable.
+#
+# Every check is invoked as: <check> <root_dir> <version_name> <tag_name>.
+# Scripts that ignore trailing arguments are unaffected.
+run_project_checks() {
+  local root_dir="$1"
+  local version_name="$2"
+  local tag_name="$3"
+  local checks="${MAGISK_RELEASE_PROJECT_CHECKS:-}"
+
+  if [[ -z "${checks// /}" ]]; then
+    return 0
+  fi
+
+  local fail=0
+  local check script candidate
+  for check in $checks; do
+    if declare -f "$check" >/dev/null 2>&1; then
+      echo "Running project check (function): $check"
+      "$check" "$root_dir" "$version_name" "$tag_name" || fail=1
+      continue
+    fi
+
+    script=""
+    for candidate in \
+      "$root_dir/scripts/release/$check.sh" \
+      "$root_dir/scripts/$check.sh" \
+      "$root_dir/scripts/ci/$check.sh"; do
+      if [[ -f "$candidate" ]]; then
+        script="$candidate"
+        break
+      fi
+    done
+
+    if [[ -z "$script" ]]; then
+      echo "FAIL: policy requires project check '$check', but it is neither a defined function nor a scripts/**/$check.sh script" >&2
+      fail=1
+      continue
+    fi
+
+    echo "Running project check (script): $check"
+    bash "$script" "$root_dir" "$version_name" "$tag_name" || fail=1
+  done
+
+  return "$fail"
 }
 
 # Main entry point — call this from your repo's wrapper script
 check_release_guard() {
   local root_dir="${1:-.}"
   local tag_name="${2:-}"
-  local allow_non_ascii="${ALLOW_NON_ASCII_COMMIT_SUBJECT:-false}"
 
+  # Must run before any policy value is read: it is what exports them.
   validate_release_policy "$root_dir" || return 1
+
+  # The policy value wins when present; the env var only supplies the fallback
+  # for policies that omit the key.
+  local allow_non_ascii="${MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT:-${ALLOW_NON_ASCII_COMMIT_SUBJECT:-false}}"
+
   echo "Release guard"
 
   local fail=0
@@ -373,6 +466,20 @@ check_release_guard() {
   if [[ "${MAGISK_RELEASE_REQUIRE_VERSIONCODE_INCREMENT:-true}" == true ]]; then check_versioncode_increment "$root_dir" || fail=1; fi
   if [[ "${MAGISK_RELEASE_REQUIRE_README_BADGES:-true}" == true ]]; then check_readme_badges "$root_dir" || fail=1; fi
   if [[ "${MAGISK_RELEASE_REQUIRE_TAG_MATCH:-true}" == true ]]; then check_tag_matches_version "$tag_name" "$VERSION_NAME" || fail=1; fi
+
+  # Play listing metadata is optional and declared per project in the policy.
+  if [[ -n "${MAGISK_RELEASE_WHATSNEW_LOCALES:-}" ]]; then
+    # shellcheck disable=SC2086
+    check_whatsnew_locales "$root_dir" "$VERSION_NAME" ${MAGISK_RELEASE_WHATSNEW_LOCALES} || fail=1
+  fi
+  if [[ -n "${MAGISK_RELEASE_FASTLANE_LOCALES:-}" ]]; then
+    # shellcheck disable=SC2086
+    FASTLANE_MIN_SCREENSHOTS="${MAGISK_RELEASE_FASTLANE_MIN_SCREENSHOTS:-${FASTLANE_MIN_SCREENSHOTS:-1}}" \
+      check_fastlane_metadata "$root_dir" ${MAGISK_RELEASE_FASTLANE_LOCALES} || fail=1
+  fi
+
+  # Project-specific checks, dispatched from the same policy file.
+  run_project_checks "$root_dir" "$VERSION_NAME" "$tag_name" || fail=1
 
   if (( fail != 0 )); then
     echo "Release guard failed." >&2

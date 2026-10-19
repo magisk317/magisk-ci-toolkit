@@ -9,6 +9,14 @@ set -euo pipefail
 # Default root depth (2 for scripts/release/, 1 for scripts/)
 MAGISK_ROOT_DEPTH="${MAGISK_ROOT_DEPTH:-2}"
 
+# Release-branch snapshot. check_branch_state_before_checks() records it;
+# push_release_branch() and release_tag() consume it. Declared up front so a
+# direct push_release_branch() call (tests, ad-hoc recovery) cannot trip over
+# `set -u`.
+release_head_commit="${release_head_commit:-}"
+release_remote_branch_commit="${release_remote_branch_commit:-}"
+release_force_push_required="${release_force_push_required:-false}"
+
 # Extract a TOML value from libs.versions.toml
 extract_toml_value() {
   local key="$1"
@@ -195,6 +203,54 @@ set_protected_branch_force_push() {
   )
 }
 
+# Snapshot the release branch *before* any check runs, because the pre-push
+# checks (Gradle, WebUI, test shards) can take long enough for the remote
+# branch to move. The later push must not clobber a branch that advanced.
+# Sets: release_head_commit, release_remote_branch_commit,
+#       release_force_push_required.
+check_branch_state_before_checks() {
+  local root_dir="$1"
+  local remote_name="$2"
+  local current_branch="$3"
+  local head_commit remote_query remote_branch_commit
+
+  head_commit="$(git -C "$root_dir" rev-parse HEAD)"
+  release_head_commit="$head_commit"
+
+  # Deliberately not piping straight into awk: with `pipefail` off inside a
+  # command substitution the ls-remote failure would be shadowed by awk's
+  # success, and a blind push would follow.
+  if ! remote_query="$(git -C "$root_dir" ls-remote "$remote_name" "refs/heads/$current_branch")"; then
+    echo "ERROR: failed to query remote branch $remote_name/$current_branch" >&2
+    exit 1
+  fi
+  remote_branch_commit="$(printf '%s\n' "$remote_query" | awk 'NR == 1 {print $1}')"
+  release_remote_branch_commit="$remote_branch_commit"
+  release_force_push_required=false
+
+  # Branch missing on the remote, or already exactly at HEAD: nothing to force.
+  if [[ -z "$remote_branch_commit" || "$remote_branch_commit" == "$head_commit" ]]; then
+    return 0
+  fi
+
+  # Remote is an ancestor of HEAD: a normal push would fast-forward.
+  if git -C "$root_dir" merge-base --is-ancestor "$remote_branch_commit" "$head_commit" 2>/dev/null; then
+    return 0
+  fi
+
+  release_force_push_required=true
+  echo "WARN: remote branch $current_branch is not fast-forwardable; will use --force-with-lease." >&2
+  echo "WARN: expected remote branch HEAD: $remote_branch_commit" >&2
+}
+
+# Push the release branch. GitLab's "allowed to force push" switch is lifted
+# only when the branch has actually diverged, so the common fast-forwardable
+# release never opens that window at all.
+#
+# The lease always carries the remote branch commit observed by
+# check_branch_state_before_checks(). An empty expectation is intentional: the
+# remote was missing the branch, and git then requires it to still be absent at
+# push time (verified: it rejects the push with "stale info" otherwise).
 push_release_branch() {
   local root_dir="$1"
   local remote_name="$2"
@@ -210,14 +266,22 @@ push_release_branch() {
         set_protected_branch_force_push "$root_dir" false
       fi
     }
-    trap restore_force_push_protection EXIT
 
-    echo "Temporarily allowing force push for protected branch: $current_branch"
-    set_protected_branch_force_push "$root_dir" true
-    force_push_enabled=true
+    if [[ "$release_force_push_required" == "true" ]]; then
+      if ! command -v glab >/dev/null 2>&1; then
+        echo "ERROR: glab is required to temporarily allow force push on protected branch $current_branch." >&2
+        exit 1
+      fi
+      echo "Temporarily allowing force push on protected branch: $current_branch"
+      set_protected_branch_force_push "$root_dir" true
+      force_push_enabled=true
+      trap restore_force_push_protection EXIT
+    fi
 
     local push_status=0
-    git -C "$root_dir" push --force-with-lease -o ci.skip "$remote_name" "$current_branch" || push_status=$?
+    git -C "$root_dir" push \
+      --force-with-lease="refs/heads/$current_branch:${release_remote_branch_commit}" \
+      -o ci.skip "$remote_name" "$current_branch" || push_status=$?
 
     restore_force_push_protection
     force_push_enabled=false
@@ -306,6 +370,10 @@ release_tag() {
 
   echo "Release tag: $tag_name (branch: $current_branch, remote: $remote_name)"
 
+  # Snapshot the branch *before* the checks: they can run long enough for the
+  # remote to move, and the push below must not silently overwrite it.
+  check_branch_state_before_checks "$root_dir" "$remote_name" "$current_branch"
+
   # Run release guard (optional — set RELEASE_SKIP_GUARD=true to skip)
   if [[ "${RELEASE_SKIP_GUARD:-false}" != "true" ]]; then
     local guard_script="${MAGISK_RELEASE_GUARD_SCRIPT:-$(dirname "${BASH_SOURCE[0]}")/check_release_guard.sh}"
@@ -322,6 +390,14 @@ release_tag() {
   # Run pre-push checks (override this function in your wrapper)
   if type run_pre_push_checks >/dev/null 2>&1; then
     run_pre_push_checks
+  fi
+
+  # Refuse to tag anything other than the commit that passed the checks: an
+  # amended commit or a rebase landing while the checks ran would otherwise
+  # ship unverified.
+  if [[ "$(git -C "$root_dir" rev-parse HEAD)" != "$release_head_commit" ]]; then
+    echo "ERROR: HEAD changed during release checks; refusing to create tag." >&2
+    exit 1
   fi
 
   # Check working tree is clean
