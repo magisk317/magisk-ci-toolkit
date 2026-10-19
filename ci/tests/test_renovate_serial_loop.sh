@@ -99,7 +99,9 @@ mr_opened_json() {
     --argjson conflicts "$3" \
     '{iid:$iid,state:"opened",source_project_id:123,source_branch:$branch,
       target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false}'
+      draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false,
+      merge_status:(if $conflicts then "cannot_be_merged" else "can_be_merged" end),
+      detailed_merge_status:(if $conflicts then "conflicts" else "mergeable" end)}'
 }
 
 # GitLab reports "locked" while a merge is being processed; every consumer of
@@ -188,6 +190,11 @@ if [[ "$method" == "PUT" ]]; then
     && grep -qx 101 "$MOCK_MERGED_FILE" && grep -qx 102 "$MOCK_MERGED_FILE"; then
     printf '%s\n' "merged" >"$MOCK_STATE_FILE"
   fi
+  # A direct merge (the wait-timeout fallback) lands the merge commit on the
+  # target branch: model the branch moving forward for the waiting states.
+  if [[ "$(cat "$MOCK_STATE_FILE")" == "open" || "$(cat "$MOCK_STATE_FILE")" == "stuck" ]]; then
+    printf '%s\n' "merged" >"$MOCK_STATE_FILE"
+  fi
   mr_merged_json "$iid" >"$output_file"
   printf '200'
   exit 0
@@ -220,7 +227,7 @@ if [[ "$url" == */repository/compare ]]; then
 fi
 
 if [[ "$url" == */merge_requests && "$requested_state" == "opened" ]]; then
-  if [[ "$state" == "open" ]]; then
+  if [[ "$state" == "open" || "$state" == "stuck" ]]; then
     printf '[%s]' "$(mr_opened_json 101 "renovate/agp" false)" >"$output_file"
   elif [[ "$state" == "backlog" ]]; then
     # Backlog set {!101, !102}; entries already merged by the drain drop out.
@@ -291,6 +298,14 @@ if [[ "$url" =~ /merge_requests/([0-9]+)$ ]]; then
   if [[ "$state" == "backlog" ]]; then
     # In a backlog the open/merged state of {!101, !102} is owned by the
     # drain: opened until the merge PUT lands in the merged log.
+    conflicts=false
+    [[ "$iid" == "${MOCK_CONFLICT_IID:-}" ]] && conflicts=true
+    mr_opened_json "$iid" "renovate/dep-${iid}" "$conflicts" >"$output_file"
+    exit 0
+  fi
+  if [[ "$state" == "stuck" ]]; then
+    # The controller never merged (a dead bridge or job): every read reports
+    # the request still open, which is the wait-timeout fallback scenario.
     conflicts=false
     [[ "$iid" == "${MOCK_CONFLICT_IID:-}" ]] && conflicts=true
     mr_opened_json "$iid" "renovate/dep-${iid}" "$conflicts" >"$output_file"
@@ -428,7 +443,8 @@ MAGISK_RENOVATE_BACKLOG_MERGE=false run_case backlog-merge-disabled backlog
 grep -F "more than one open Renovate merge request exists before round 1" "$tmp_root/backlog-merge-disabled/output.log" >/dev/null
 
 # A conflicting request cannot be drained; it stays open and the loop falls
-# back to the single-request wait, which eventually fails with a clear reason.
+# back to the single-request wait, which eventually times out, attempts one
+# direct merge (skipped again for the conflict) and fails with the reason.
 MOCK_CONFLICT_IID=102 run_case backlog-partial backlog
 [[ "$(cat "$tmp_root/backlog-partial/status")" == "1" ]] || {
   cat "$tmp_root/backlog-partial/output.log" >&2
@@ -436,7 +452,8 @@ MOCK_CONFLICT_IID=102 run_case backlog-partial backlog
 }
 grep -F "Renovate merge request !102 has conflicts; backlog merge is skipped." "$tmp_root/backlog-partial/output.log" >/dev/null
 grep -F "Continuing with existing Renovate merge request !102." "$tmp_root/backlog-partial/output.log" >/dev/null
-grep -F "Renovate merge request !102 was not merged into beta after 4 polls" "$tmp_root/backlog-partial/output.log" >/dev/null
+grep -F "Warning: Renovate merge request !102 was not merged within 4 polls; attempting a direct merge." "$tmp_root/backlog-partial/output.log" >/dev/null
+grep -F "Renovate merge request !102 was not merged into beta after 4 polls and a direct merge attempt (merge_status: cannot_be_merged, detailed_merge_status: conflicts)" "$tmp_root/backlog-partial/output.log" >/dev/null
 grep -Fx "101" "$tmp_root/backlog-partial/merged.log" >/dev/null
 
 # A merge request locked mid-merge is a transient GitLab state (the
@@ -465,18 +482,57 @@ grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 grep -F "Starting Renovate serial round 1/2" "$tmp_root/locked-backlog/output.log" >/dev/null
 [[ "$(cat "$tmp_root/locked-backlog/renovate-count")" == "2" ]] || exit 1
 
-# A permanently locked request still terminates the loop - through the normal
-# timeout with the real reason - instead of the "unsupported state" dead end.
-MOCK_LOCKED_IID=101 run_case locked-timeout open
-[[ "$(cat "$tmp_root/locked-timeout/status")" == "1" ]] || {
-  cat "$tmp_root/locked-timeout/output.log" >&2
+# A request locked for the whole poll window no longer terminates the loop:
+# the wait times out, the fallback drains the request directly (its sha-pinned
+# PUT wins or answers 405 against the concurrent controller merge) and the
+# round completes. Regression for 2026-10-19, where a controller that never
+# merged cost the whole schedule run.
+MOCK_LOCKED_IID=101 run_case locked-timeout-drain open
+[[ "$(cat "$tmp_root/locked-timeout-drain/status")" == "0" ]] || {
+  cat "$tmp_root/locked-timeout-drain/output.log" >&2
   exit 1
 }
-grep -F "Renovate merge request !101 was not merged into beta after 4 polls" "$tmp_root/locked-timeout/output.log" >/dev/null
-if grep -F "unsupported state locked" "$tmp_root/locked-timeout/output.log" >/dev/null; then
+grep -F "Merge request !101 is locked (a merge is in progress); waiting (1/4)" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+grep -F "Warning: Renovate merge request !101 was not merged within 4 polls; attempting a direct merge." "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+grep -F "Renovate merge request !101 is locked (a merge is in progress); retrying the merge." "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+grep -F "Confirmed Renovate merge request !101 is included in beta" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+grep -F "Starting Renovate serial round 2/2" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+[[ "$(cat "$tmp_root/locked-timeout-drain/renovate-count")" == "1" ]] || exit 1
+if grep -F "unsupported state locked" "$tmp_root/locked-timeout-drain/output.log" >/dev/null; then
   echo "a locked request must not be reported as an unsupported state" >&2
   exit 1
 fi
+
+# The fallback drain is the last resort: a single request the controller never
+# merged (dead bridge, dead controller job) is merged directly and the round
+# continues instead of burning the whole schedule run.
+run_case controller-dead stuck
+[[ "$(cat "$tmp_root/controller-dead/status")" == "0" ]] || {
+  cat "$tmp_root/controller-dead/output.log" >&2
+  exit 1
+}
+grep -F "Continuing with existing Renovate merge request !101." "$tmp_root/controller-dead/output.log" >/dev/null
+grep -F "Warning: Renovate merge request !101 was not merged within 4 polls; attempting a direct merge." "$tmp_root/controller-dead/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/controller-dead/output.log" >/dev/null
+grep -F "Confirmed Renovate merge request !101 is included in beta" "$tmp_root/controller-dead/output.log" >/dev/null
+grep -F "Starting Renovate serial round 2/2" "$tmp_root/controller-dead/output.log" >/dev/null
+[[ "$(cat "$tmp_root/controller-dead/renovate-count")" == "1" ]] || exit 1
+grep -Fx "101" "$tmp_root/controller-dead/merged.log" >/dev/null
+
+# When the direct merge cannot land either - GitLab's post-rebase
+# merge_status recheck window answers 422 to every PUT (build-logic !21,
+# 2026-10-19) - the loop fails, but the reason now reports both status fields
+# instead of the misleading detailed_merge_status alone.
+MOCK_MERGE_HTTP_STATUS=422 run_case controller-dead-still-stuck stuck
+[[ "$(cat "$tmp_root/controller-dead-still-stuck/status")" == "1" ]] || {
+  cat "$tmp_root/controller-dead-still-stuck/output.log" >&2
+  exit 1
+}
+grep -F "Merge attempt 1/2 for !101 returned HTTP 422: merge rejected by mock" "$tmp_root/controller-dead-still-stuck/output.log" >/dev/null
+grep -F "Warning: merge request !101 did not become mergeable after 2 attempts; it stays in the backlog." "$tmp_root/controller-dead-still-stuck/output.log" >/dev/null
+grep -F "Renovate merge request !101 was not merged into beta after 4 polls and a direct merge attempt (merge_status: can_be_merged, detailed_merge_status: mergeable)" "$tmp_root/controller-dead-still-stuck/output.log" >/dev/null
+[[ "$(cat "$tmp_root/controller-dead-still-stuck/renovate-count")" == "0" ]] || exit 1
 
 # api_curl must arm curl's transient-error retry. GitLab answers 503 while a
 # rate-limit window is active, and one such reply used to abort the whole run

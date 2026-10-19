@@ -46,4 +46,42 @@ if trusted_target_branch "magisk3171/not-a-project" >/dev/null; then
   exit 1
 fi
 
+# The reconcile sweep (ci/reconcile_trusted_renovate_mrs.sh) visits exactly
+# the enumerated paths: every one of them must resolve an ID and a target
+# branch, none of them may be the controller project itself, and the set must
+# cover every upstream in the two case statements above.
+expected_paths=(
+  "magisk3171/shared/magisk-build-logic"
+  "magisk3171/MiPushFramework"
+  "magisk3171/XposedSmsCode"
+  "magisk3171/xinyi-relay"
+  "magisk3171/SerialBridge"
+  "magisk3171/napgram-ecosystem/NapGram"
+  "magisk3171/napgram-ecosystem/napgram-ui-dist"
+  "magisk3171/MiPushConfigurations"
+  "magisk3171/MiPushZygisk"
+  "magisk3171/napgram-ecosystem/NapLink"
+  "magisk3171/android-host-tools-arm64"
+)
+mapfile -t enumerated_paths < <(trusted_project_paths)
+if [[ "${#enumerated_paths[@]}" -ne "${#expected_paths[@]}" ]]; then
+  echo "trusted_project_paths must enumerate ${#expected_paths[@]} projects, got ${#enumerated_paths[@]}" >&2
+  exit 1
+fi
+for index in "${!expected_paths[@]}"; do
+  if [[ "${enumerated_paths[$index]}" != "${expected_paths[$index]}" ]]; then
+    echo "unexpected enumerated path ${enumerated_paths[$index]} at position ${index}" >&2
+    exit 1
+  fi
+  trusted_path="${expected_paths[$index]}"
+  trusted_project_id "$trusted_path" >/dev/null || {
+    echo "enumerated path $trusted_path must resolve a project ID" >&2
+    exit 1
+  }
+  trusted_target_branch "$trusted_path" >/dev/null || {
+    echo "enumerated path $trusted_path must resolve a target branch" >&2
+    exit 1
+  }
+done
+
 echo "Trusted project mapping tests passed"

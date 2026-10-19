@@ -60,6 +60,7 @@ shell:test:
       ci/cancel_merged_mr_pipelines.sh
       ci/auto_merge_upstream_mr.sh
       ci/auto_merge_self_renovate_mrs.sh
+      ci/reconcile_trusted_renovate_mrs.sh
       ci/renovate_serial_loop.sh
       gradle/run_gradle_with_retry.sh
       ci/tests/test_cancel_older_mr_pipelines.sh
@@ -68,6 +69,7 @@ shell:test:
       ci/tests/test_ci_predefined_variables.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_auto_merge_self_renovate_mrs.sh
+      ci/tests/test_reconcile_trusted_renovate_mrs.sh
       ci/tests/test_renovate_serial_loop.sh
       ci/tests/test_gitlab_telegram_release.sh
       ci/tests/test_linux_release_template.sh
@@ -81,6 +83,7 @@ shell:test:
     - bash ci/tests/test_ci_predefined_variables.sh
     - bash ci/tests/test_auto_merge_upstream_mr.sh
     - bash ci/tests/test_auto_merge_self_renovate_mrs.sh
+    - bash ci/tests/test_reconcile_trusted_renovate_mrs.sh
     - bash ci/tests/test_renovate_serial_loop.sh
     - bash ci/tests/test_gitlab_telegram_release.sh
     - bash ci/tests/test_linux_release_template.sh
@@ -103,6 +106,14 @@ renovate:gitlab:
   # so this job is pinned there.
   tags:
     - magisk-arm64-linux
+  # The high-frequency reconcile schedule (MAGISK_RENOVATE_RECONCILE=true,
+  # see renovate:reconcile below) must not also run the daily serial
+  # orchestrator: these pipelines exist for the merge sweep alone.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $MAGISK_RENOVATE_RECONCILE != "true"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web" && $MAGISK_RENOVATE_RECONCILE != "true"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api" && $MAGISK_RENOVATE_RECONCILE != "true"'
+    - when: never
   variables:
     MAGISK_RENOVATE_REPOSITORY: "magisk3171/shared/magisk-ci-toolkit"
     MAGISK_RENOVATE_PLATFORM_AUTOMERGE: "false"
@@ -147,10 +158,45 @@ renovate:self-automerge:
   script:
     - bash ci/auto_merge_self_renovate_mrs.sh
   rules:
-    # Same source contract as the serial loop in renovate:gitlab.
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web"'
-    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api"'
+    # Same source contract as the serial loop in renovate:gitlab, with the
+    # same reconcile-schedule exclusion.
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $MAGISK_RENOVATE_RECONCILE != "true"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web" && $MAGISK_RENOVATE_RECONCILE != "true"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api" && $MAGISK_RENOVATE_RECONCILE != "true"'
+    - when: never
+
+# Reconcile sweep: the serial loop and the consumer controller each merge one
+# request per trigger, and both can leave a request unmerged when their
+# trigger dies - a dropped TLS connection during get_sources (2026-10-18), or
+# GitLab's post-rebase merge_status recheck window answering 422 to all six
+# controller merge attempts (2026-10-19, build-logic !21). The high-frequency
+# reconcile schedule (MAGISK_RENOVATE_RECONCILE=true, every 15 minutes) runs
+# this sweep across every trusted project plus this repository and merges the
+# requests GitLab already reports as can_be_merged; everything else waits for
+# the next sweep or the daily orchestrator. The variable keeps the daily
+# renovate:gitlab and renovate:self-automerge jobs out of these pipelines.
+renovate:reconcile:
+  extends: .magisk_utility_base
+  stage: maintenance
+  # The sweep merges other projects' merge requests mid-flight; a push to main
+  # must not cancel it between a validated request and its merge.
+  interruptible: false
+  needs: []
+  # Same transport hardening as the controller jobs: one dropped connection
+  # during get_sources must not skip a sweep (the api_retry ladder protects
+  # script-internal API calls, not the runner's git fetch).
+  retry:
+    max: 2
+  # Pin to the arm64 runner: direct Oracle egress to gitlab.com (see
+  # renovate:self-automerge).
+  tags:
+    - magisk-arm64-linux
+  script:
+    - bash ci/reconcile_trusted_renovate_mrs.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $MAGISK_RENOVATE_RECONCILE == "true"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "web" && $MAGISK_RENOVATE_RECONCILE == "true"'
+    - if: '$DEPENDENCY_OWNER == "gitlab" && $CI_PIPELINE_SOURCE == "api" && $MAGISK_RENOVATE_RECONCILE == "true"'
     - when: never
 
 cancel:older:mr:pipelines:

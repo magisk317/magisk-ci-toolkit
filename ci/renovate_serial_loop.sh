@@ -16,6 +16,14 @@
 # pipeline self-heals instead of failing with "more than one open Renovate
 # merge request exists". Set MAGISK_RENOVATE_BACKLOG_MERGE=false to restore
 # the strict fail behaviour.
+#
+# The same drain is the last resort for a single request the controller never
+# merged: when the wait for the controller exhausts its poll window - a bridge
+# that never fired, a controller job that died during get_sources (2026-10-18
+# TLS drop), or GitLab's post-rebase merge_status recheck window answering 422
+# to every controller merge attempt (2026-10-19, build-logic !21) - the loop
+# merges the request directly before failing the schedule run. One dead
+# controller then costs seconds instead of a day of dependency updates.
 set -euo pipefail
 
 readonly HARD_MAX_ROUNDS=50
@@ -367,6 +375,8 @@ wait_for_merge() {
   local mr_file
   local state
   local merge_sha
+  local merge_status_now
+  local detailed_status_now
 
   for ((poll = 1; poll <= max_polls; poll++)); do
     mr_file="$tmp_dir/mr-${iid}-${poll}.json"
@@ -401,7 +411,33 @@ wait_for_merge() {
     ((poll < max_polls && poll_interval > 0)) && sleep "$poll_interval"
   done
 
-  fail "Renovate merge request !${iid} was not merged into ${CI_COMMIT_REF_NAME} after ${max_polls} polls"
+  # The controller did not merge within the poll window. Drain the request
+  # directly through the same merge_renovate_mr path a backlog uses before
+  # failing the run: the failure classes above are exactly the ones the
+  # backlog drain exists for, and a single request is just a backlog of one.
+  echo "Warning: Renovate merge request !${iid} was not merged within ${max_polls} polls; attempting a direct merge."
+  merge_renovate_mr "$iid"
+
+  mr_file="$tmp_dir/mr-${iid}-fallback.json"
+  get_merge_request "$iid" "$mr_file"
+  state="$(jq -r '.state' "$mr_file")"
+  if [[ "$state" == "merged" ]]; then
+    merge_sha="$(jq -r '.merge_commit_sha // .squash_commit_sha // empty' "$mr_file")"
+    require_sha "merge request !${iid} merge SHA" "$merge_sha"
+    if branch_contains_commit "$pre_round_sha" "$merge_sha"; then
+      echo "Confirmed Renovate merge request !${iid} is included in ${CI_COMMIT_REF_NAME}."
+      return 0
+    fi
+    echo "Merge request !${iid} is merged, but ${CI_COMMIT_REF_NAME} has not caught up yet."
+  fi
+
+  # Report both status fields: detailed_merge_status alone claimed "mergeable"
+  # for build-logic !21 on 2026-10-19 while every merge PUT answered 422
+  # inside GitLab's post-rebase recheck window, which sent the failure hunt
+  # in the wrong direction.
+  merge_status_now="$(jq -r '.merge_status // "unknown"' "$mr_file")"
+  detailed_status_now="$(jq -r '.detailed_merge_status // "unknown"' "$mr_file")"
+  fail "Renovate merge request !${iid} was not merged into ${CI_COMMIT_REF_NAME} after ${max_polls} polls and a direct merge attempt (merge_status: ${merge_status_now}, detailed_merge_status: ${detailed_status_now})"
 }
 
 find_merged_after_scan() {
