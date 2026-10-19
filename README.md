@@ -263,7 +263,7 @@ hosts meant to stay direct (for example `repo.maven.apache.org`) keep bypassing
 the proxy. Jobs without proxy variables (GitHub-hosted runners) get no extra
 flags. Set `MAGISK_GRADLE_PROXY_DISABLE=1` to opt out explicitly.
 The runtime checkout accepts a branch, tag, or full commit SHA. Production consumers should pin an
-**immutable tag** (for example `ref: v1`), not a bare commit SHA: a SHA looks equally pinned but
+**full 40-character commit SHA** in every include and runtime checkout; a moving tag is forbidden because
 becomes unreachable the moment the toolkit history is rewritten, which then breaks every consumer at
 once. Use the same ref for every toolkit `include.ref` and for `MAGISK_CI_TOOLKIT_REF`, so the
 parsed templates and the scripts executed by jobs cannot come from different revisions.

@@ -56,7 +56,8 @@
       : "${MAGISK_ANDROID_COMPILE_SDK:=}"
       : "${MAGISK_ANDROID_COMPILE_SDK_PACKAGE:=}"
       : "${MAGISK_ANDROID_SDK_PACKAGES:=platform-tools}"
-      : "${MAGISK_CI_TOOLKIT_REF:=main}"
+      : "${MAGISK_CI_TOOLKIT_REF:?MAGISK_CI_TOOLKIT_REF must be a full 40-character toolkit SHA}"
+      [[ "$MAGISK_CI_TOOLKIT_REF" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "MAGISK_CI_TOOLKIT_REF must be a full 40-character SHA" >&2; exit 1; }
       # Google ships the Android CLI (android sdk ...) only for linux/x86_64;
       # cmdline-tools >= 23 also makes sdkmanager a stub that execs the CLI.
       # Standalone sdkmanager lives in the older cmdline-tools (19.0 here) and
@@ -327,6 +328,7 @@
         fi
       fi
       # toolkit-checkout-contract:end
+      bash "$MAGISK_CI_TOOLKIT_DIR/android/validate_host_tools.sh" --sdk-root "$ANDROID_HOME" --build-tools "${MAGISK_ANDROID_BUILD_TOOLS_VERSION:-37.0.0}"
       # Sync shared version catalog from build-logic submodule.
       # The developer's local copy may be stale if the submodule pointer
       # was bumped without re-running the sync script.

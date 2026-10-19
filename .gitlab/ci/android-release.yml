@@ -37,7 +37,7 @@
       # runtime overhead.
       if [[ -f scripts/resolve_ci_toolkit.sh ]]; then
         chmod +x scripts/resolve_ci_toolkit.sh
-        bash scripts/resolve_ci_toolkit.sh >/dev/null || true
+        bash scripts/resolve_ci_toolkit.sh >/dev/null
       fi
   after_script:
     - |

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../ci/gitlab_api.sh"
+
 urlencode() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
 }
@@ -23,19 +26,16 @@ require_env() {
   fi
 }
 
-gitlab_curl() {
-  if [[ -n "${GITLAB_RELEASE_TOKEN:-}" ]]; then
-    curl --silent --show-error --location --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" "$@"
-  else
-    curl --silent --show-error --location --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$@"
-  fi
-}
+gitlab_curl() { gitlab_api_curl_url "$@"; }
 
 require_env CI_API_V4_URL
 require_env CI_PROJECT_ID
 require_env CI_PROJECT_URL
 require_env CI_COMMIT_TAG
-require_env CI_JOB_TOKEN
+if [[ -z "${CI_JOB_TOKEN:-}" && -z "${GITLAB_RELEASE_TOKEN:-}" && -z "${GITLAB_TOKEN:-}" && -z "${GITLAB_DEPLOY_TOKEN:-}" ]]; then
+  echo "ERROR: a GitLab token is required" >&2
+  exit 2
+fi
 
 notes_file="${MAGISK_RELEASE_NOTES_FILE:-release-notes.md}"
 package_name="${MAGISK_GITLAB_RELEASE_PACKAGE_NAME:-android-release}"

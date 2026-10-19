@@ -19,7 +19,7 @@ extract_toml_value() {
 # Check version extraction from TOML
 check_version_extraction() {
   local root_dir="$1"
-  local version_file="${root_dir}/gradle/libs.versions.toml"
+  local version_file="${root_dir}/${MAGISK_RELEASE_VERSION_FILE:-gradle/libs.versions.toml}"
 
   if [[ ! -f "$version_file" ]]; then
     echo "ERROR: Missing $version_file" >&2
@@ -128,7 +128,7 @@ check_commit_subjects() {
 check_changelog_section() {
   local root_dir="$1"
   local version_name="$2"
-  local changelog_file="${root_dir}/docs/CHANGELOG.md"
+  local changelog_file="${root_dir}/${MAGISK_RELEASE_CHANGELOG_FILE:-docs/CHANGELOG.md}"
 
   if [[ ! -f "$changelog_file" ]]; then
     echo "FAIL: missing changelog file ($changelog_file)"
@@ -150,7 +150,7 @@ check_changelog_section() {
 check_versioncode_increment() {
   local root_dir="$1"
   local toml_file="${root_dir}/gradle/libs.versions.toml"
-  local changelog_file="${root_dir}/docs/CHANGELOG.md"
+  local changelog_file="${root_dir}/${MAGISK_RELEASE_CHANGELOG_FILE:-docs/CHANGELOG.md}"
 
   if [[ ! -f "$toml_file" ]]; then
     echo "FAIL: missing version catalog ($toml_file)"
@@ -307,12 +307,61 @@ check_readme_badges() {
   return 1
 }
 
+validate_release_policy() {
+  local root_dir="$1"
+  local policy_file="${MAGISK_RELEASE_POLICY_FILE:-$root_dir/scripts/config/release-policy.json}"
+  [[ -f "$policy_file" ]] || {
+    echo "FAIL: release policy missing: $policy_file" >&2
+    return 1
+  }
+  eval "$(python3 - "$policy_file" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+required = {
+    "version_file", "changelog_file", "require_changelog",
+    "require_versioncode_increment", "require_readme_badges", "require_tag_match",
+}
+missing = sorted(required - data.keys())
+if missing:
+    raise SystemExit(f"release policy missing keys: {', '.join(missing)}")
+for key in ("version_file", "changelog_file"):
+    if not isinstance(data[key], str) or not data[key]:
+        raise SystemExit(f"release policy {key} must be a non-empty string")
+for key in required - {"version_file", "changelog_file"}:
+    if not isinstance(data[key], bool):
+        raise SystemExit(f"release policy {key} must be boolean")
+print("MAGISK_RELEASE_VERSION_FILE=" + shlex.quote(data["version_file"]))
+print("MAGISK_RELEASE_CHANGELOG_FILE=" + shlex.quote(data["changelog_file"]))
+for key in ("require_changelog", "require_versioncode_increment", "require_readme_badges", "require_tag_match"):
+    print("MAGISK_RELEASE_" + key.upper() + "=" + shlex.quote(str(data[key]).lower()))
+if isinstance(data.get("allow_non_ascii_commit_subject"), bool):
+    print("MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT=" + shlex.quote(str(data["allow_non_ascii_commit_subject"]).lower()))
+if isinstance(data.get("whatsnew_locales"), list):
+    print("MAGISK_RELEASE_WHATSNEW_LOCALES=" + shlex.quote(" ".join(map(str, data["whatsnew_locales"]))))
+if isinstance(data.get("fastlane_locales"), list):
+    print("MAGISK_RELEASE_FASTLANE_LOCALES=" + shlex.quote(" ".join(map(str, data["fastlane_locales"]))))
+if isinstance(data.get("whatsnew_max_length"), int):
+    print("MAGISK_RELEASE_WHATSNEW_MAX_LENGTH=" + str(data["whatsnew_max_length"]))
+if isinstance(data.get("fastlane_min_screenshots"), int):
+    print("MAGISK_RELEASE_FASTLANE_MIN_SCREENSHOTS=" + str(data["fastlane_min_screenshots"]))
+if isinstance(data.get("whatsnew_directory"), str):
+    print("MAGISK_RELEASE_WHATSNEW_DIRECTORY=" + shlex.quote(data["whatsnew_directory"]))
+PY
+)"
+  export MAGISK_RELEASE_POLICY_FILE="$policy_file"
+}
+
 # Main entry point — call this from your repo's wrapper script
 check_release_guard() {
   local root_dir="${1:-.}"
   local tag_name="${2:-}"
   local allow_non_ascii="${ALLOW_NON_ASCII_COMMIT_SUBJECT:-false}"
 
+  validate_release_policy "$root_dir" || return 1
   echo "Release guard"
 
   local fail=0
@@ -320,10 +369,10 @@ check_release_guard() {
 
   check_version_extraction "$root_dir" || fail=1
   check_commit_subjects "$root_dir" "$allow_non_ascii" || fail=1
-  check_changelog_section "$root_dir" "$VERSION_NAME" || fail=1
-  check_versioncode_increment "$root_dir" || fail=1
-  check_readme_badges "$root_dir" || fail=1
-  check_tag_matches_version "$tag_name" "$VERSION_NAME" || fail=1
+  if [[ "${MAGISK_RELEASE_REQUIRE_CHANGELOG:-true}" == true ]]; then check_changelog_section "$root_dir" "$VERSION_NAME" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_VERSIONCODE_INCREMENT:-true}" == true ]]; then check_versioncode_increment "$root_dir" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_README_BADGES:-true}" == true ]]; then check_readme_badges "$root_dir" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_TAG_MATCH:-true}" == true ]]; then check_tag_matches_version "$tag_name" "$VERSION_NAME" || fail=1; fi
 
   if (( fail != 0 )); then
     echo "Release guard failed." >&2

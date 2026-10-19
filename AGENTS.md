@@ -128,7 +128,7 @@ so patch updates never arrive and two runners can disagree. Prefer A whenever po
    in consumers (xinyi's `scripts/ci/gitlab_stage_jdk27.sh` and `.xinyi_desktop_kmp_linux`
    restate the same fetch for the pure-JVM desktop track) and in packaging drivers.
 3. All three consumers (XposedSmsCode, xinyi-relay, MiPushFramework) include this project
-   with `include: project: magisk3171/shared/magisk-ci-toolkit, ref: v1` -- there is **no**
+   with `include: project: magisk3171/shared/magisk-ci-toolkit, ref: <full-40-character-commit-sha>` -- there is **no**
    `.magisk-ci-toolkit` submodule in any of them. Push to `main` and re-point the signed
    `v1` tag, and every consumer picks it up on its next pipeline; no per-repo commit is
    needed (and none should be made: the tag is the only pin).
