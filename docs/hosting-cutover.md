@@ -1,7 +1,7 @@
 # Hosting Ownership And GitHub Cutover
 
 This runbook covers XposedSmsCode, xinyi-relay, MiPushFramework, their shared source repositories,
-and MiPushZygisk. It records ordering and safety rules only; commit counts, branch tips, backup
+MiPushConfigurations and MiPushZygisk. It records ordering and safety rules only; commit counts, branch tips, backup
 branch names, and copied secret inventories belong to live inspection rather than this document.
 
 ## Current state
@@ -9,6 +9,9 @@ branch names, and copied secret inventories belong to live inspection rather tha
 Rechecked 2026-10-21: every GitHub remote answers `git ls-remote` again, so the 2026-07-26 note
 below is historical. The three GitHub parent repositories and the shared repositories all respond,
 and the shared repositories whose default branch is mirrored are pushed to by pipeline.
+The two MiPush satellites are the exception still open: GitLab `beta` is their default branch and the
+mirror publishes `beta`, while GitHub still answers to `main`, so their visible GitHub tip lags by
+design until step 3 of the first-mirror sequence is finished.
 
 > As of 2026-07-26, live `git ls-remote` checks for the three GitHub parent repositories returned
 > HTTP 403 because the owner account was suspended.
@@ -35,11 +38,15 @@ ecosystem's content on GitHub. A consumer includes it, sets
 - takes the target name from the variable, never from `CI_PROJECT_NAME`, because several GitHub
   repository names still predate the `magisk-` prefix used on GitLab.
 
-Not every repository uses the anchor yet. The three parents plus MiPushConfigurations and
-MiPushZygisk still hand-copy a sync job whose tag branch runs `git push github --tags --force`,
-which publishes the withheld safety-net tags the first time a release tag is pushed. Those five are
-the remaining conversion targets; the exclusion list above is what makes the anchor worth including
-rather than copying.
+Every repository in the ecosystem now uses the anchor. The three parents plus MiPushConfigurations
+and MiPushZygisk used to hand-copy a sync job whose tag branch ran `git push github --tags --force`,
+which would have published the withheld safety-net tags the first time a release tag was pushed;
+they were converted on 2026-10-21. A conversion keeps only the consumer-specific decision in the
+consumer: the three parents set `stage: release` because `android:release:github` needs the tag on
+GitHub before it creates the release there, MiPushFramework drops its `ci-android` runner tag so a
+mirror push no longer occupies an Android build slot, and the two MiPush satellites keep `needs: []`
+and trade `image: alpine:latest` for the pinned utility image. The push, the tag filter and the
+remote cleanup belong to the anchor alone, which is why copying it is not the same as including it.
 
 Mirroring is redundancy, not cutover. `.gitmodules`, toolkit resolver URLs and CI clone URLs keep
 pointing at GitLab; step 5 of the sequence below is the only thing that changes them, and it has not
