@@ -35,6 +35,12 @@ ecosystem's content on GitHub. A consumer includes it, sets
 - takes the target name from the variable, never from `CI_PROJECT_NAME`, because several GitHub
   repository names still predate the `magisk-` prefix used on GitLab.
 
+Not every repository uses the anchor yet. The three parents plus MiPushConfigurations and
+MiPushZygisk still hand-copy a sync job whose tag branch runs `git push github --tags --force`,
+which publishes the withheld safety-net tags the first time a release tag is pushed. Those five are
+the remaining conversion targets; the exclusion list above is what makes the anchor worth including
+rather than copying.
+
 Mirroring is redundancy, not cutover. `.gitmodules`, toolkit resolver URLs and CI clone URLs keep
 pointing at GitLab; step 5 of the sequence below is the only thing that changes them, and it has not
 happened.
@@ -51,6 +57,13 @@ A repository that has never been mirrored needs one deliberate pass, in this ord
 4. Check that no GitHub-side writer is left enabled: `gh api repos/<repo>/actions/workflows` must show
    nothing active that can push commits or open dependency pull requests, and `.github/dependabot.yml`
    must be gone. A mirror force-pushed over an active writer produces silent loss, not a conflict.
+
+The six shared repositories completed this pass on 2026-10-21, in the order above. Step 4 is the part
+an API cannot finish by itself: Dependabot security updates and code-scanning default setup are
+repository settings rather than workflows, and GitHub owns the `dynamic/dependabot/*`,
+`dynamic/dependency-graph/*` and `dynamic/github-code-scanning/*` entries outright -- they answer
+`422 Unable to disable this workflow` to the workflow endpoint. With `.github/dependabot.yml` gone
+they schedule nothing, so the residual is a listed-but-inert entry, not a writer.
 
 ## Divergence audit
 
@@ -84,13 +97,15 @@ The parent repositories each carried `.github/dependabot.yml`, narrowed at the t
 `github-actions` only. That is still a second dependency owner: Dependabot opens branches and
 pull requests against the GitHub copy, and anything merged there is force-pushed over by the next
 mirror run, so the bump silently disappears instead of landing on the source. Those files are
-removed from GitLab, which deletes them from GitHub with the next mirror push.
+removed from GitLab, which deletes them from GitHub with the next mirror push, and Dependabot
+security updates are switched off at the repository setting so GitHub cannot reopen the question.
 
 Dependabot is not the only GitHub-side writer. `gh api repos/<repo>/actions/workflows` showed
 several parent workflows still `active` (CI, Detekt scan, Detekt autofix, shared-submodule
 compat, dependency submission). A workflow that can push commits must be disabled on GitHub, not
-merely left unreferenced, before the mirror is trusted to be the only history. Check the live
-state again rather than trusting this list.
+merely left unreferenced, before the mirror is trusted to be the only history. Every repository-owned
+one was disabled on 2026-10-21; check the live state again rather than trusting this list, because a
+re-enabled workflow is indistinguishable in the mirror's history from a lost commit.
 
 ## Ownership rules
 
