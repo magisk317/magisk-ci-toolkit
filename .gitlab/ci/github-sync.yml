@@ -1,0 +1,96 @@
+# Reusable GitHub redundancy-mirror job.
+#
+# GitLab owns this ecosystem: source branches, dependency automation
+# (.gitlab/ci/renovate.yml) and release side effects all run here. GitHub keeps
+# only a forced copy of the default branch plus its release tags, so the history
+# still exists if this host becomes unreachable. It is not a second place to commit --
+# --force means a hand-made GitHub-side commit is overwritten by the next
+# pipeline. See docs/hosting-cutover.md for the divergence rules this job
+# assumes and for what a real cutover would additionally require.
+#
+# A consumer includes this file and /.gitlab/ci/utility.yml (the anchor supplies
+# the pinned alpine image and its package set; job-level `extends` is resolved
+# only after GitLab merges every included file, so the two includes stay
+# separate rather than nesting one inside the other), declares a `sync` stage,
+# and defines one job:
+#
+#   sync:github:
+#     extends: .magisk_github_sync
+#     variables:
+#       MAGISK_GITHUB_MIRROR_REPOSITORY: "magisk317/<github-repository-name>"
+#
+# Keep .gitlab/ci/renovate.yml in the same include list only when the consumer
+# also needs dependency automation; the mirror job itself has no other
+# requirement beyond the two includes above.
+#
+# The GitHub name may differ from the GitLab project name, so it is never
+# inferred from CI_PROJECT_NAME.
+#
+# GITHUB_PAT is a protected group variable, therefore it is injected only on
+# protected refs; every mirrored repository protects its default branch. A tag
+# pipeline receives it only when a protected-tag rule covers the tag name.
+.magisk_github_sync:
+  extends: .magisk_utility_base
+  stage: sync
+  # The amd64 group runner carries concurrent = 1 and is the slot Android builds
+  # queue on, so mirror pushes go to arm64 by default. A consumer that really
+  # wants the other host overrides `tags` on its own job.
+  tags:
+    - magisk-arm64-linux
+  variables:
+    # Tag mirroring needs the whole ref namespace, so the shallow pipeline
+    # checkout is widened before the push.
+    GIT_DEPTH: "0"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_COMMIT_TAG'
+    # Feature branches and merge requests are deliberately not mirrored: a
+    # redundancy copy of the default branch is enough to restore service, and
+    # mirroring everything would let a throwaway branch become the visible tip.
+    - when: never
+  script:
+    - |
+      set -eu
+      target="${MAGISK_GITHUB_MIRROR_REPOSITORY:-}"
+      if [ -z "$target" ]; then
+        echo "ERROR: MAGISK_GITHUB_MIRROR_REPOSITORY is not set for $CI_PROJECT_NAME" >&2
+        exit 1
+      fi
+      sync_token="${GITHUB_PAT:-${GITHUB_RELEASE_TOKEN:-}}"
+      if [ -z "$sync_token" ]; then
+        echo "ERROR: neither GITHUB_PAT nor GITHUB_RELEASE_TOKEN is available on $CI_COMMIT_REF_NAME; check that the ref is protected and that GITHUB_PAT is protected+masked on the group" >&2
+        exit 1
+      fi
+      # Remove-then-add instead of "remote add || true": a stale cached remote
+      # from an earlier job would otherwise silently keep pointing at another
+      # repository.
+      git remote remove github >/dev/null 2>&1 || true
+      git remote add github "https://magisk317:${sync_token}@github.com/${target}.git"
+      git fetch --tags --quiet origin
+      if [ -n "${CI_COMMIT_BRANCH:-}" ]; then
+        git push github "HEAD:refs/heads/$CI_COMMIT_BRANCH" --force
+      fi
+      # Internal safety-net tags are not release content: backup/, archive/, tmp/, wip/
+      # and keep/ point at history a rewrite retired, usually the very commits the rewrite
+      # exists to remove. Publishing them would hand that history to a host this job cannot
+      # clean up afterwards, so tags travel by explicit refspec and excluded prefixes stay
+      # home.
+      excluded_tag_prefixes="${MAGISK_GITHUB_MIRROR_EXCLUDED_TAG_PREFIXES:-backup/ archive/ tmp/ wip/ keep/}"
+      tag_refspecs=""
+      for tag in $(git for-each-ref --format='%(refname:lstrip=2)' refs/tags); do
+        excluded=false
+        for prefix in $excluded_tag_prefixes; do
+          case "$tag" in "$prefix"*) excluded=true; break ;; esac
+        done
+        if [ "$excluded" = false ]; then
+          tag_refspecs="$tag_refspecs refs/tags/$tag:refs/tags/$tag"
+        fi
+      done
+      if [ -n "$tag_refspecs" ]; then
+        # Word splitting is intentional: one push carries every retained refspec.
+        # shellcheck disable=SC2086
+        git push github --force $tag_refspecs
+      fi
+      # The URL carries the credential, so it must not survive the job in a
+      # runner working directory that outlives it.
+      git remote remove github

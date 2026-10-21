@@ -34,11 +34,17 @@ include:
   # anchor through their own pipelines (sync:github, bundle refreshers, ...);
   # this repository's own alpine jobs extend it below.
   - local: /.gitlab/ci/utility.yml
+  # Local include of the GitHub redundancy-mirror anchor. Consumers reference
+  # .magisk_github_sync through their own pipelines; including it here keeps
+  # this repository's own default branch mirrored with the same rules the
+  # consumers get, instead of a hand-copied job that can drift.
+  - local: /.gitlab/ci/github-sync.yml
 
 stages:
   - test
   - maintenance
   - control
+  - sync
 
 shell:test:
   extends: .magisk_utility_base
@@ -72,6 +78,7 @@ shell:test:
       ci/tests/test_reconcile_trusted_renovate_mrs.sh
       ci/tests/test_renovate_serial_loop.sh
       ci/tests/test_gitlab_telegram_release.sh
+      ci/tests/test_github_sync_template.sh
       ci/tests/test_linux_release_template.sh
       gradle/tests/test_run_gradle_with_retry.sh
       release/tests/test_release_notes.sh
@@ -95,6 +102,13 @@ shell:test:
     - bash release/tests/test_release_tag.sh
     - bash release/tests/test_check_release_guard.sh
     - bash ci/tests/test_trusted_projects.sh
+    - bash ci/tests/test_github_sync_template.sh
+
+# Redundancy mirror of this repository to GitHub.
+sync:github:
+  extends: .magisk_github_sync
+  variables:
+    MAGISK_GITHUB_MIRROR_REPOSITORY: "magisk317/magisk-ci-toolkit"
 
 # Self-Renovate: run the shared serial orchestrator against this repository on
 # a schedule. Consumers reuse the same template with their repository and
