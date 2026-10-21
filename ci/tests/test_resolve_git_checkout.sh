@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# The template assertions below grep for literal shell and GitLab expressions, so
+# their patterns stay single-quoted on purpose.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,8 +80,8 @@ assert_detached_at "$checkout_dir" "$commit_two" "failed raw SHA checkout"
 if grep -Fq 'MAGISK_CI_TOOLKIT_REF: "main"' "$android_template"; then
   fail "GitLab job-level variables still override consumer MAGISK_CI_TOOLKIT_REF"
 fi
-grep -Fq ': "${MAGISK_CI_TOOLKIT_REF:=main}"' "$android_template" ||
-  fail "GitLab template is missing the branch-compatible default"
+grep -Fq ': "${MAGISK_CI_TOOLKIT_REF:?MAGISK_CI_TOOLKIT_REF must be a full 40-character toolkit SHA}"' "$android_template" ||
+  fail "GitLab template must require the consumer-pinned toolkit ref instead of defaulting it"
 grep -Fq 'git init --quiet "$MAGISK_CI_TOOLKIT_DIR"' "$android_template" ||
   fail "GitLab template is missing exact-fetch repository initialization"
 grep -Fq 'toolkit_repository_auth=' "$android_template" ||
