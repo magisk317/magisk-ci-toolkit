@@ -8,10 +8,11 @@ checkout, Android CI, release, security, notification, and code-generation behav
 
 ## Immutable Checkout Contract
 
-- Production consumers should pin the toolkit with one immutable tag (for example `ref: v1`), not a
-  bare commit SHA: a SHA looks equally pinned but becomes unreachable the moment the toolkit history
-  is rewritten, which then breaks every consumer at once. Tags survive rewrites because the release
-  process re-points them.
+- Production consumers pin the toolkit with one full 40-character commit SHA. Moving refs were the
+  rule until 2026-10-21, when `v1` was deleted: a re-pointed tag changes what every consumer runs
+  without producing a commit in that consumer, so a pipeline can differ from its own history and no
+  diff explains it. A SHA is the reviewable half of that trade -- the cost is that a toolkit release
+  or a history rewrite means one explicit bump commit per consumer, and that bump is the point.
 - GitLab consumers must use that same ref for both `include.ref` and the top-level
   `MAGISK_CI_TOOLKIT_REF`; otherwise the included YAML and the runtime checkout can drift apart.
 - Tags and full commit SHAs must be fetched directly and checked out detached. Do not pass them to
@@ -129,9 +130,10 @@ so patch updates never arrive and two runners can disagree. Prefer A whenever po
    restate the same fetch for the pure-JVM desktop track) and in packaging drivers.
 3. All three consumers (XposedSmsCode, xinyi-relay, MiPushFramework) include this project
    with `include: project: magisk3171/shared/magisk-ci-toolkit, ref: <full-40-character-commit-sha>` -- there is **no**
-   `.magisk-ci-toolkit` submodule in any of them. Push to `main` and re-point the signed
-   `v1` tag, and every consumer picks it up on its next pipeline; no per-repo commit is
-   needed (and none should be made: the tag is the only pin).
+   `.magisk-ci-toolkit` submodule in any of them. Pushing to `main` changes nothing for them:
+   each consumer keeps its own pinned SHA, so a toolchain switch needs one bump commit per
+   consumer plus the matching top-level `MAGISK_CI_TOOLKIT_REF`, and a consumer that is not
+   bumped keeps running the old image until it is.
 4. Validate with the full gate on every consumer -- `detekt` plus the branch's full test task
    set and `kover`, not `assemble` alone. The Gradle/Kotlin/AGP toolchain probe changes from
    "a JDK under `ANDROID_HOME`" to "the system JDK", which `assemble` does not exercise.

@@ -114,7 +114,7 @@ sync:github:
 
 # Self-Renovate: run the shared serial orchestrator against this repository on
 # a schedule. Consumers reuse the same template with their repository and
-# the pinned v1 toolkit ref; here the loop runs from the default branch.
+# the pinned toolkit SHA; here the loop runs from the default branch.
 renovate:gitlab:
   extends: .magisk_renovate_gitlab
   interruptible: false
@@ -143,7 +143,7 @@ renovate:gitlab:
     # Consumers get that cancellation from the renovate bridge kind; this
     # repository performs it in renovate:self-automerge below.
     MAGISK_CANCEL_OLDER_MR_PIPELINES: "true"
-    # Consumers pin the moving v1 tag; the toolkit drives its own loop from main.
+    # Consumers pin one exact toolkit SHA; the toolkit drives its own loop from main.
     MAGISK_CI_TOOLKIT_REF: "main"
 
 # Self-Renovate auto-merge: a multi-project bridge cannot target the project

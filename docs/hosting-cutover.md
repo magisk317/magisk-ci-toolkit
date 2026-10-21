@@ -98,11 +98,10 @@ state again rather than trusting this list.
 - `DEPENDENCY_OWNER` selects the Renovate/Dependabot side; `RELEASE_OWNER` selects release and Play
   publication. Do not switch both platforms on concurrently.
 - Shared repositories are published before parent repositories that pin them.
-- Production toolkit consumers pin the signed toolkit tag, and use that one ref for every
-  GitLab `include.ref` and the top-level `MAGISK_CI_TOOLKIT_REF`; see the toolkit's Immutable
-  Checkout Contract. A full SHA satisfies the equality half of that rule but is not the
-  preferred pin, and `ci/verify_toolkit_pin.sh` still demands the SHA form wherever a parent
-  repository runs it, so those parents stay on a SHA until the verifier is updated.
+- Production toolkit consumers pin one full 40-character commit SHA and repeat it for every GitLab
+  `include.ref`, the top-level `MAGISK_CI_TOOLKIT_REF`, and any generated resolver fallback, so the
+  included YAML and the runtime checkout cannot drift apart. The `v1` tag was deleted on 2026-10-21;
+  `ci/verify_toolkit_pin.sh` enforces exactly this shape, and `AGENTS.md` carries the contract.
 - Parent-specific build tasks and artifact policy stay in the parent repository. Shared checkout,
   retry, release, notification, and security behavior stays in this toolkit.
 
