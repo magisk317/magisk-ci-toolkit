@@ -24,6 +24,20 @@
 # to every controller merge attempt (2026-10-19, build-logic !21) - the loop
 # merges the request directly before failing the schedule run. One dead
 # controller then costs seconds instead of a day of dependency updates.
+#
+# A direct merge is still refused while the request sits behind the target
+# branch: these projects merge with merge_method=ff, which requires the source
+# branch to already contain the target tip, and neither merge_status
+# ("can_be_merged") nor detailed_merge_status ("mergeable") reports that. The
+# same !21 answered HTTP 422 {"message":"Branch cannot be merged"} to six
+# attempts a night for four nights, because every merge loop in the toolkit
+# classified that as transient readiness and re-fired the identical doomed PUT.
+# Renovate would have rebased the request itself, but the loop short-circuits
+# into "Continuing with existing Renovate merge request" and never runs it, so
+# a busy default branch is a permanent deadlock. Before each merge attempt the
+# loop now measures behindness with a compare against the target branch and
+# fast-forwards the request through GitLab's rebase endpoint. Set
+# MAGISK_RENOVATE_AUTOREBASE=false to restore the blind retry behaviour.
 set -euo pipefail
 
 readonly HARD_MAX_ROUNDS=50
@@ -32,6 +46,13 @@ readonly DEFAULT_MAX_POLLS=120
 readonly DEFAULT_NO_MR_GRACE_POLLS=3
 readonly DEFAULT_MERGE_ATTEMPTS=6
 readonly DEFAULT_MERGE_DELAY_SECONDS=2
+readonly DEFAULT_REBASE_POLLS=20
+readonly HARD_MAX_REBASE_POLLS=100
+
+# Rebases per merge request, per merge call. A busy default branch can outrun
+# one rebase, so a bounded retry is useful; an unbounded one would turn a
+# permanently busy branch into an endless loop of branch rewrites.
+readonly MERGE_REBASE_LIMIT=2
 
 fail() {
   echo "Error: $*" >&2
@@ -84,6 +105,16 @@ merge_delay="${MAGISK_RENOVATE_MERGE_DELAY_SECONDS:-$DEFAULT_MERGE_DELAY_SECONDS
 require_unsigned_integer "MAGISK_RENOVATE_MERGE_ATTEMPTS" "$merge_attempts"
 require_unsigned_integer "MAGISK_RENOVATE_MERGE_DELAY_SECONDS" "$merge_delay"
 ((merge_attempts > 0)) || fail "MAGISK_RENOVATE_MERGE_ATTEMPTS must be greater than zero"
+
+autorebase="${MAGISK_RENOVATE_AUTOREBASE:-true}"
+case "$autorebase" in
+  true | false) ;;
+  *) fail "MAGISK_RENOVATE_AUTOREBASE must be true or false" ;;
+esac
+rebase_polls="${MAGISK_RENOVATE_REBASE_POLLS:-$DEFAULT_REBASE_POLLS}"
+require_unsigned_integer "MAGISK_RENOVATE_REBASE_POLLS" "$rebase_polls"
+((rebase_polls > 0 && rebase_polls <= HARD_MAX_REBASE_POLLS)) || \
+  fail "MAGISK_RENOVATE_REBASE_POLLS must be between 1 and ${HARD_MAX_REBASE_POLLS}"
 
 api_base="${CI_API_V4_URL%/}/projects/${CI_PROJECT_ID}"
 auth_header=(--header "PRIVATE-TOKEN: ${RENOVATE_TOKEN}")
@@ -180,11 +211,128 @@ merge_api_curl() {
   curl --silent --show-error --location "${auth_header[@]}" "$@"
 }
 
+# merge_request_is_behind <mr_sha>: report whether the request HEAD still lacks
+# commits that are already on ${CI_COMMIT_REF_NAME}. A fast-forward merge is
+# refused in exactly that case and no merge request field says so, so the
+# comparison is the only authoritative read: commits reachable from the target
+# branch but not from the request HEAD are the commits the request is missing.
+# Returns 0 (behind), 1 (up to date) or 2 (not measurable - the caller then
+# keeps the old behaviour and lets the merge endpoint judge).
+merge_request_is_behind() {
+  local mr_sha="$1"
+  local compare_file="$tmp_dir/behind-${mr_sha}.json"
+
+  require_sha "merge request HEAD sha" "$mr_sha"
+  if ! api_curl --get \
+    --data-urlencode "from=${mr_sha}" \
+    --data-urlencode "to=${CI_COMMIT_REF_NAME}" \
+    --output "$compare_file" \
+    "${api_base}/repository/compare"; then
+    echo "Could not compare the merge request HEAD with ${CI_COMMIT_REF_NAME}; skipping the rebase check." >&2
+    return 2
+  fi
+  if ! jq -e 'type == "object"' "$compare_file" >/dev/null 2>&1; then
+    echo "Compare response for ${CI_COMMIT_REF_NAME} is invalid; skipping the rebase check." >&2
+    return 2
+  fi
+  if ! jq -e '(.compare_timeout // false) == false' "$compare_file" >/dev/null; then
+    echo "GitLab timed out comparing the merge request with ${CI_COMMIT_REF_NAME}; skipping the rebase check." >&2
+    return 2
+  fi
+  jq -e '((.commits // []) | length) > 0' "$compare_file" >/dev/null
+}
+
+# rebase_merge_request <iid> <mr_sha>: fast-forward the request's source branch
+# onto the target tip through GitLab's rebase endpoint, then wait for the
+# queued operation to land and for the request HEAD to move. skip_ci keeps the
+# rewrite from queueing a fresh pipeline for a branch whose only remaining
+# consumer is this merge. Returns 0 when the branch moved - the caller must
+# re-read the request and merge the new HEAD -, 2 when GitLab refused for a
+# reason that cannot change (the token cannot push to the source branch), and
+# 1 for everything else, which the caller may try again within its limit.
+rebase_merge_request() {
+  local iid="$1"
+  local mr_sha="$2"
+  local response_file="$tmp_dir/rebase-${iid}.json"
+  local status_file
+  local http_status
+  local message
+  local poll
+  local new_sha
+
+  # State-changing like the merge PUT: GitLab answers 4xx with a JSON body, so
+  # the status comes from --write-out and not from --fail.
+  http_status="$(merge_api_curl \
+    --request PUT \
+    --data-urlencode 'skip_ci=true' \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    "${api_base}/merge_requests/${iid}/rebase")" || {
+      echo "Rebase request for !${iid} did not reach GitLab." >&2
+      return 1
+    }
+  case "$http_status" in
+    202)
+      ;;
+    401 | 403)
+      # "Cannot push to the source branch", a protected branch, a token that
+      # only holds merge rights: retrying cannot change the answer.
+      message="$(jq -r '.message // .error // "rebase was refused"' "$response_file" 2>/dev/null || printf '%s' 'rebase was refused')"
+      echo "Rebase request for !${iid} returned HTTP ${http_status}: ${message}; no further rebase will be attempted." >&2
+      return 2
+      ;;
+    *)
+      # 409 is GitLab refusing to enqueue the operation while a long
+      # transaction holds the lock, which a later attempt can get past.
+      message="$(jq -r '.message // .error // "rebase was refused"' "$response_file" 2>/dev/null || printf '%s' 'rebase was refused')"
+      echo "Rebase request for !${iid} returned HTTP ${http_status}: ${message}" >&2
+      return 1
+      ;;
+  esac
+
+  for ((poll = 1; poll <= rebase_polls; poll++)); do
+    if ((poll > 1 && merge_delay > 0)); then
+      sleep "$merge_delay"
+    fi
+    status_file="$tmp_dir/rebase-status-${iid}-${poll}.json"
+    if ! api_curl --get \
+      --data-urlencode 'include_rebase_in_progress=true' \
+      --output "$status_file" \
+      "${api_base}/merge_requests/${iid}"; then
+      echo "Could not read the rebase status of !${iid}." >&2
+      return 1
+    fi
+    if [[ "$(jq -r '.rebase_in_progress // false' "$status_file")" == "true" ]]; then
+      continue
+    fi
+    message="$(jq -r '.merge_error // empty' "$status_file" 2>/dev/null || printf '%s' '')"
+    if [[ -n "$message" ]]; then
+      echo "Rebase of !${iid} failed: ${message}" >&2
+      return 1
+    fi
+    new_sha="$(jq -r '(.sha // "") | ascii_downcase' "$status_file" 2>/dev/null || printf '%s' '')"
+    if [[ "$new_sha" =~ ^[0-9a-f]{40,64}$ && "$new_sha" != "$mr_sha" ]]; then
+      echo "Rebased Renovate merge request !${iid} onto ${CI_COMMIT_REF_NAME} at ${new_sha}."
+      return 0
+    fi
+    # The operation finished without moving the branch: GitLab already saw the
+    # source branch as up to date, so there is nothing here for the merge to
+    # wait for and the attempt proceeds against the unchanged HEAD.
+    echo "Rebase of !${iid} finished without moving the branch." >&2
+    return 1
+  done
+
+  echo "Rebase of !${iid} did not finish within ${rebase_polls} status reads." >&2
+  return 1
+}
+
 # merge_renovate_mr <iid>: merge one open Renovate merge request at its HEAD
 # sha with the controller semantics: draft, conflicting and pipeline-gated
-# requests are skipped, transient readiness (including a request locked while
-# its merge is being processed) is retried with a backoff ladder, and a
-# request that is already merged or closed counts as done.
+# requests are skipped, a request that fell behind the target branch is
+# fast-forwarded through the rebase endpoint first (a fast-forward merge cannot
+# land otherwise), transient readiness (including a request locked while its
+# merge is being processed) is retried with a backoff ladder, and a request that
+# is already merged or closed counts as done.
 merge_renovate_mr() {
   local iid="$1"
   local attempt
@@ -195,6 +343,8 @@ merge_renovate_mr() {
   local message
   local retry_delay
   local backoff
+  local rebased=0
+  local rebase_status
 
   for ((attempt = 1; attempt <= merge_attempts; attempt++)); do
     response_file="$tmp_dir/merge-mr-${iid}-${attempt}.json"
@@ -238,6 +388,26 @@ merge_renovate_mr() {
 
     mr_sha="$(jq -r '.sha | ascii_downcase' "$response_file")"
     require_sha "merge request !${iid} HEAD sha" "$mr_sha"
+
+    # A request that fell behind the target branch can never fast-forward
+    # merge, and neither merge_status nor detailed_merge_status reports that
+    # (see the header comment), so the old behaviour was to re-fire the same
+    # doomed PUT until the backoff ladder ran out.
+    if [[ "$autorebase" == "true" ]] && ((rebased < MERGE_REBASE_LIMIT)) &&
+      merge_request_is_behind "$mr_sha"; then
+      rebased=$((rebased + 1))
+      echo "Renovate merge request !${iid} is behind ${CI_COMMIT_REF_NAME}; rebasing it before merging (${rebased}/${MERGE_REBASE_LIMIT})."
+      rebase_status=0
+      rebase_merge_request "$iid" "$mr_sha" || rebase_status=$?
+      if ((rebase_status == 0)); then
+        continue
+      fi
+      if ((rebase_status == 2)); then
+        rebased="$MERGE_REBASE_LIMIT"
+      fi
+      # Anything else leaves the request exactly where the pre-fix loop found
+      # it: the merge attempt below runs with the unchanged HEAD.
+    fi
 
     http_status="$(merge_api_curl \
       --request PUT \

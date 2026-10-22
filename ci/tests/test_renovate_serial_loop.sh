@@ -65,41 +65,45 @@ printf '%s\n' "$1" >>"$MOCK_SLEEP_LOG"
 MOCK_SLEEP
 chmod +x "$mock_bin/sleep"
 
-# Merge-request body helpers. sha aaa... is the request HEAD, bbb... the merge
-# commit that lands on the target branch.
-mr_opened_json() {
-  jq -nc \
-    --argjson iid "$1" \
-    --arg branch "$2" \
-    --argjson conflicts "$3" \
-    '{iid:$iid,state:"opened",source_project_id:123,source_branch:$branch,
-      target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false}'
-}
-
-mr_merged_json() {
-  jq -nc \
-    --argjson iid "$1" \
-    '{iid:$iid,state:"merged",source_project_id:123,
-      source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",
-      sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
-}
-
 cat >"$mock_bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Merge-request body helpers. sha aaa... is the request HEAD, bbb... the merge
-# commit that lands on the target branch.
+# Commit model. aaa... is the target branch tip before this run merges, bbb...
+# the merge commit that lands on it, ccc... a Renovate request HEAD (branched
+# off aaa, so it contains the tip - until MOCK_BEHIND=1 moves main forward by
+# eee...), ddd... the same request after the rebase landed, eee... the commit
+# that reached the target branch while the request sat open.
+readonly BASE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+readonly MERGE_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+readonly MR_SHA="${MOCK_MR_SHA:-cccccccccccccccccccccccccccccccccccccccc}"
+readonly MR_REBASED_SHA="${MOCK_REBASED_SHA:-dddddddddddddddddddddddddddddddddddddddd}"
+readonly NEW_TARGET_SHA="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+# The request HEAD the mock reports: the rebased one once a rebase has been
+# served, the original one before that.
+mr_is_rebased() { [[ -n "${MOCK_REBASED_FILE:-}" && -e "$MOCK_REBASED_FILE" ]]; }
+mr_head_sha() {
+  if mr_is_rebased; then
+    printf '%s' "$MR_REBASED_SHA"
+  else
+    printf '%s' "$MR_SHA"
+  fi
+}
+
+# Merge-request body helpers. A behind request keeps reporting the reassuring
+# merge_status/detailed_merge_status pair, which is exactly the trap: neither
+# field says the fast-forward merge will be refused.
 mr_opened_json() {
   jq -nc \
     --argjson iid "$1" \
     --arg branch "$2" \
     --argjson conflicts "$3" \
+    --arg sha "$(mr_head_sha)" \
     '{iid:$iid,state:"opened",source_project_id:123,source_branch:$branch,
-      target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      target_branch:"beta",sha:$sha,
       draft:false,has_conflicts:$conflicts,merge_when_pipeline_succeeds:false,
+      rebase_in_progress:false,merge_error:null,
       merge_status:(if $conflicts then "cannot_be_merged" else "can_be_merged" end),
       detailed_merge_status:(if $conflicts then "conflicts" else "mergeable" end)}'
 }
@@ -107,16 +111,17 @@ mr_opened_json() {
 # GitLab reports "locked" while a merge is being processed; every consumer of
 # an MR response must treat it as transient.
 mr_locked_json() {
-  jq -nc --argjson iid "$1" '{iid:$iid,state:"locked",source_project_id:123,source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",draft:false,has_conflicts:false,merge_when_pipeline_succeeds:false}'
+  jq -nc --argjson iid "$1" --arg sha "$(mr_head_sha)" '{iid:$iid,state:"locked",source_project_id:123,source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",sha:$sha,draft:false,has_conflicts:false,merge_when_pipeline_succeeds:false}'
 }
 
 mr_merged_json() {
   jq -nc \
     --argjson iid "$1" \
+    --arg sha "$(mr_head_sha)" \
+    --arg merge_sha "$MERGE_SHA" \
     '{iid:$iid,state:"merged",source_project_id:123,
       source_branch:("renovate/dep-"+($iid|tostring)),target_branch:"beta",
-      sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      merge_commit_sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
+      sha:$sha,merge_commit_sha:$merge_sha}'
 }
 
 output_file=""
@@ -125,6 +130,8 @@ url=""
 requested_state=""
 write_out=""
 merge_sha=""
+compare_from=""
+skip_ci=""
 while (($# > 0)); do
   case "$1" in
     --output)
@@ -139,6 +146,8 @@ while (($# > 0)); do
       case "$2" in
         state=*) requested_state="${2#state=}" ;;
         sha=*) merge_sha="${2#sha=}" ;;
+        from=*) compare_from="${2#from=}" ;;
+        skip_ci=*) skip_ci="${2#skip_ci=}" ;;
       esac
       shift 2
       ;;
@@ -172,12 +181,44 @@ while (($# > 0)); do
 done
 
 if [[ "$method" == "PUT" ]]; then
-  [[ "$url" == */merge ]] || { echo "mock curl: unsupported PUT URL $url" >&2; exit 64; }
   iid="${url##*/merge_requests/}"
   iid="${iid%%/*}"
+
+  if [[ "$url" == */rebase ]]; then
+    [[ "${MOCK_BEHIND:-}" == "1" ]] || { echo "mock curl: unexpected rebase in this scenario" >&2; exit 64; }
+    # Rewriting a Renovate branch must not queue a second pipeline for it.
+    [[ "$skip_ci" == "true" ]] || { echo "mock curl: rebase must pass skip_ci=true" >&2; exit 64; }
+    if [[ -n "${MOCK_REBASE_HTTP_STATUS:-}" ]]; then
+      jq -n '{message:"rebase rejected by mock"}' >"$output_file"
+      printf '%s' "$MOCK_REBASE_HTTP_STATUS"
+      exit 0
+    fi
+    : >"${MOCK_REBASED_FILE:?MOCK_REBASED_FILE is required to serve a rebase}"
+    jq -n '{rebase_in_progress:true,merge_error:null}' >"$output_file"
+    printf '202'
+    exit 0
+  fi
+
+  [[ "$url" == */merge ]] || { echo "mock curl: unsupported PUT URL $url" >&2; exit 64; }
   if [[ -n "${MOCK_MERGE_HTTP_STATUS:-}" ]]; then
     jq -n '{message:"merge rejected by mock"}' >"$output_file"
     printf '%s' "$MOCK_MERGE_HTTP_STATUS"
+    exit 0
+  fi
+  if [[ "${MOCK_BEHIND:-}" == "1" ]] && ! mr_is_rebased; then
+    # merge_method=ff refuses a request that does not already contain the
+    # target tip. The refusal is a 422 no status field predicts, and it only
+    # clears when the rebase moves the branch: this is the whole point of the
+    # scenario, so a merge PUT issued against the un-rebased HEAD must fail.
+    jq -n '{message:"Branch cannot be merged"}' >"$output_file"
+    printf '422'
+    exit 0
+  fi
+  if [[ "${MOCK_BEHIND:-}" == "1" && "$merge_sha" != "$(mr_head_sha)" ]]; then
+    # The sha-pinned PUT must name the moved HEAD; the pre-rebase commit is
+    # gone, and merging it anyway would silently drop the rebase.
+    jq -n '{message:"Branch cannot be merged"}' >"$output_file"
+    printf '409'
     exit 0
   fi
   if grep -qx "$iid" "$MOCK_MERGED_FILE" 2>/dev/null; then
@@ -208,21 +249,32 @@ fi
 state="$(cat "$MOCK_STATE_FILE")"
 if [[ "$url" == */repository/branches/* ]]; then
   if [[ "$state" == "done" || "$state" == "merged" ]]; then
-    sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    sha="$MERGE_SHA"
   else
-    sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    sha="$BASE_SHA"
   fi
   jq -n --arg sha "$sha" '{commit:{id:$sha}}' >"$output_file"
   exit 0
 fi
 
 if [[ "$url" == */repository/commits ]]; then
-  jq -n '[{id:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]' >"$output_file"
+  jq -n --arg sha "$MERGE_SHA" '[{id:$sha}]' >"$output_file"
   exit 0
 fi
 
 if [[ "$url" == */repository/compare ]]; then
-  jq -n '{compare_timeout:false,commits:[{id:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}' >"$output_file"
+  if [[ "$compare_from" == "$(mr_head_sha)" ]]; then
+    # The loop asking what the request HEAD still lacks from the target branch,
+    # the only read that can see a fast-forward refusal coming.
+    if [[ "${MOCK_BEHIND:-}" == "1" ]] && ! mr_is_rebased; then
+      jq -n --arg sha "$NEW_TARGET_SHA" '{compare_timeout:false,commits:[{id:$sha}]}' >"$output_file"
+    else
+      jq -n '{compare_timeout:false,commits:[]}' >"$output_file"
+    fi
+  else
+    # The loop confirming a merge commit reached the target branch.
+    jq -n --arg sha "$MERGE_SHA" '{compare_timeout:false,commits:[{id:$sha}]}' >"$output_file"
+  fi
   exit 0
 fi
 
@@ -357,6 +409,9 @@ run_case() {
     MOCK_LOCKED_IID="${MOCK_LOCKED_IID:-}" \
     MOCK_LOCKED_ONCE="${MOCK_LOCKED_ONCE:-}" \
     MOCK_LOCK_MARKER="$case_dir/lock-marker" \
+    MOCK_BEHIND="${MOCK_BEHIND:-}" \
+    MOCK_REBASED_FILE="$case_dir/rebased" \
+    MOCK_REBASE_HTTP_STATUS="${MOCK_REBASE_HTTP_STATUS:-}" \
     CI_API_V4_URL="https://gitlab.example/api/v4" \
     CI_PROJECT_ID="123" \
     CI_PROJECT_DIR="$case_dir/project" \
@@ -372,6 +427,7 @@ run_case() {
     MAGISK_RENOVATE_MERGE_ATTEMPTS="${MAGISK_RENOVATE_MERGE_ATTEMPTS:-2}" \
     MAGISK_RENOVATE_MERGE_DELAY_SECONDS="${MAGISK_RENOVATE_MERGE_DELAY_SECONDS:-0}" \
     MAGISK_RENOVATE_BACKLOG_MERGE="${MAGISK_RENOVATE_BACKLOG_MERGE:-true}" \
+    MAGISK_RENOVATE_AUTOREBASE="${MAGISK_RENOVATE_AUTOREBASE:-true}" \
     bash "$loop_script" >"$case_dir/output.log" 2>&1
   run_status=$?
   set -e
@@ -406,8 +462,8 @@ run_case backlog-before-round backlog
   exit 1
 }
 grep -F "Renovate backlog detected: 2 open Renovate merge requests (!102, !101) targeting beta; merging them directly before continuing." "$tmp_root/backlog-before-round/output.log" >/dev/null
-grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-before-round/output.log" >/dev/null
-grep -F "Merged Renovate merge request !102 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-before-round/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/backlog-before-round/output.log" >/dev/null
+grep -F "Merged Renovate merge request !102 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/backlog-before-round/output.log" >/dev/null
 grep -F "Starting Renovate serial round 1/2" "$tmp_root/backlog-before-round/output.log" >/dev/null
 [[ "$(cat "$tmp_root/backlog-before-round/renovate-count")" == "2" ]] || exit 1
 grep -Fx "101" "$tmp_root/backlog-before-round/merged.log" >/dev/null
@@ -421,8 +477,8 @@ run_case backlog-after-scan none
   exit 1
 }
 grep -F "Renovate backlog detected: 2 open Renovate merge requests (!102, !101)" "$tmp_root/backlog-after-scan/output.log" >/dev/null
-grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-after-scan/output.log" >/dev/null
-grep -F "Merged Renovate merge request !102 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/backlog-after-scan/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/backlog-after-scan/output.log" >/dev/null
+grep -F "Merged Renovate merge request !102 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/backlog-after-scan/output.log" >/dev/null
 grep -F "Detected already-merged Renovate merge request !101" "$tmp_root/backlog-after-scan/output.log" >/dev/null
 
 # A rejected merge (no merge permission) fails loudly with an actionable
@@ -478,7 +534,7 @@ MOCK_LOCKED_IID=101 MOCK_LOCKED_ONCE=1 run_case locked-backlog backlog
   exit 1
 }
 grep -F "Renovate merge request !101 is locked (a merge is in progress); retrying the merge." "$tmp_root/locked-backlog/output.log" >/dev/null
-grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/locked-backlog/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/locked-backlog/output.log" >/dev/null
 grep -F "Starting Renovate serial round 1/2" "$tmp_root/locked-backlog/output.log" >/dev/null
 [[ "$(cat "$tmp_root/locked-backlog/renovate-count")" == "2" ]] || exit 1
 
@@ -495,7 +551,7 @@ MOCK_LOCKED_IID=101 run_case locked-timeout-drain open
 grep -F "Merge request !101 is locked (a merge is in progress); waiting (1/4)" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
 grep -F "Warning: Renovate merge request !101 was not merged within 4 polls; attempting a direct merge." "$tmp_root/locked-timeout-drain/output.log" >/dev/null
 grep -F "Renovate merge request !101 is locked (a merge is in progress); retrying the merge." "$tmp_root/locked-timeout-drain/output.log" >/dev/null
-grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
 grep -F "Confirmed Renovate merge request !101 is included in beta" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
 grep -F "Starting Renovate serial round 2/2" "$tmp_root/locked-timeout-drain/output.log" >/dev/null
 [[ "$(cat "$tmp_root/locked-timeout-drain/renovate-count")" == "1" ]] || exit 1
@@ -514,7 +570,7 @@ run_case controller-dead stuck
 }
 grep -F "Continuing with existing Renovate merge request !101." "$tmp_root/controller-dead/output.log" >/dev/null
 grep -F "Warning: Renovate merge request !101 was not merged within 4 polls; attempting a direct merge." "$tmp_root/controller-dead/output.log" >/dev/null
-grep -F "Merged Renovate merge request !101 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$tmp_root/controller-dead/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at cccccccccccccccccccccccccccccccccccccccc" "$tmp_root/controller-dead/output.log" >/dev/null
 grep -F "Confirmed Renovate merge request !101 is included in beta" "$tmp_root/controller-dead/output.log" >/dev/null
 grep -F "Starting Renovate serial round 2/2" "$tmp_root/controller-dead/output.log" >/dev/null
 [[ "$(cat "$tmp_root/controller-dead/renovate-count")" == "1" ]] || exit 1
@@ -533,6 +589,81 @@ grep -F "Merge attempt 1/2 for !101 returned HTTP 422: merge rejected by mock" "
 grep -F "Warning: merge request !101 did not become mergeable after 2 attempts; it stays in the backlog." "$tmp_root/controller-dead-still-stuck/output.log" >/dev/null
 grep -F "Renovate merge request !101 was not merged into beta after 4 polls and a direct merge attempt (merge_status: can_be_merged, detailed_merge_status: mergeable)" "$tmp_root/controller-dead-still-stuck/output.log" >/dev/null
 [[ "$(cat "$tmp_root/controller-dead-still-stuck/renovate-count")" == "0" ]] || exit 1
+
+# The structural half of the !21 failure class (2026-10-19..22): with
+# merge_method=ff a request that fell behind the target branch can never merge,
+# and neither merge_status nor detailed_merge_status says so - the mock reports
+# the same reassuring pair here. Before the fix every one of these runs re-fired
+# the identical PUT until the ladder ran out; now the loop measures behindness
+# against the target branch and fast-forwards the request through the rebase
+# endpoint, then merges the moved HEAD.
+MOCK_BEHIND=1 run_case backlog-behind backlog
+[[ "$(cat "$tmp_root/backlog-behind/status")" == "0" ]] || {
+  cat "$tmp_root/backlog-behind/output.log" >&2
+  exit 1
+}
+grep -F "Renovate merge request !101 is behind beta; rebasing it before merging (1/2)." "$tmp_root/backlog-behind/output.log" >/dev/null
+grep -F "Rebased Renovate merge request !101 onto beta at dddddddddddddddddddddddddddddddddddddddd" "$tmp_root/backlog-behind/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at dddddddddddddddddddddddddddddddddddddddd" "$tmp_root/backlog-behind/output.log" >/dev/null
+grep -F "Merged Renovate merge request !102 at dddddddddddddddddddddddddddddddddddddddd" "$tmp_root/backlog-behind/output.log" >/dev/null
+grep -Fx "101" "$tmp_root/backlog-behind/merged.log" >/dev/null
+grep -Fx "102" "$tmp_root/backlog-behind/merged.log" >/dev/null
+# The mock moves both branches with one rebase marker, so !102 is already
+# up to date; a second rebase in the same run would mean the loop did not
+# re-read the moved HEAD.
+if grep -F "rebasing it before merging (2/2)" "$tmp_root/backlog-behind/output.log" >/dev/null; then
+  echo "a rebased request must be merged without rebasing again" >&2
+  exit 1
+fi
+if grep -F "did not become mergeable" "$tmp_root/backlog-behind/output.log" >/dev/null; then
+  echo "a behind request must be rebased and merged, not left in the backlog" >&2
+  exit 1
+fi
+
+# The same behind request reached through the wait-timeout fallback instead of a
+# backlog: one dead controller plus one busy default branch must still not cost
+# the schedule run.
+MOCK_BEHIND=1 run_case controller-dead-behind stuck
+[[ "$(cat "$tmp_root/controller-dead-behind/status")" == "0" ]] || {
+  cat "$tmp_root/controller-dead-behind/output.log" >&2
+  exit 1
+}
+grep -F "Warning: Renovate merge request !101 was not merged within 4 polls; attempting a direct merge." "$tmp_root/controller-dead-behind/output.log" >/dev/null
+grep -F "Renovate merge request !101 is behind beta; rebasing it before merging (1/2)." "$tmp_root/controller-dead-behind/output.log" >/dev/null
+grep -F "Merged Renovate merge request !101 at dddddddddddddddddddddddddddddddddddddddd" "$tmp_root/controller-dead-behind/output.log" >/dev/null
+grep -F "Confirmed Renovate merge request !101 is included in beta." "$tmp_root/controller-dead-behind/output.log" >/dev/null
+[[ "$(cat "$tmp_root/controller-dead-behind/renovate-count")" == "1" ]] || exit 1
+grep -Fx "101" "$tmp_root/controller-dead-behind/merged.log" >/dev/null
+
+# The escape hatch keeps the old behaviour restorable, and the old failure is
+# still reported with GitLab's own refusal so the reason stays findable.
+MOCK_BEHIND=1 MAGISK_RENOVATE_AUTOREBASE=false run_case behind-without-rebase stuck
+[[ "$(cat "$tmp_root/behind-without-rebase/status")" == "1" ]] || {
+  cat "$tmp_root/behind-without-rebase/output.log" >&2
+  exit 1
+}
+grep -F "Merge attempt 1/2 for !101 returned HTTP 422: Branch cannot be merged" "$tmp_root/behind-without-rebase/output.log" >/dev/null
+grep -F "Warning: merge request !101 did not become mergeable after 2 attempts; it stays in the backlog." "$tmp_root/behind-without-rebase/output.log" >/dev/null
+grep -F "was not merged into beta after 4 polls and a direct merge attempt (merge_status: can_be_merged, detailed_merge_status: mergeable)" "$tmp_root/behind-without-rebase/output.log" >/dev/null
+if grep -F "rebasing it before merging" "$tmp_root/behind-without-rebase/output.log" >/dev/null; then
+  echo "MAGISK_RENOVATE_AUTOREBASE=false must not rebase" >&2
+  exit 1
+fi
+
+# A rebase GitLab refuses for a reason that cannot change (HTTP 403: the token
+# cannot push to the source branch) must not become a rebase loop: the merge
+# attempt proceeds with the unchanged HEAD and the run fails as it did before.
+MOCK_BEHIND=1 MOCK_REBASE_HTTP_STATUS=403 run_case behind-rebase-refused stuck
+[[ "$(cat "$tmp_root/behind-rebase-refused/status")" == "1" ]] || {
+  cat "$tmp_root/behind-rebase-refused/output.log" >&2
+  exit 1
+}
+grep -F "Rebase request for !101 returned HTTP 403: rebase rejected by mock; no further rebase will be attempted." "$tmp_root/behind-rebase-refused/output.log" >/dev/null
+grep -F "Merge attempt 1/2 for !101 returned HTTP 422: Branch cannot be merged" "$tmp_root/behind-rebase-refused/output.log" >/dev/null
+if grep -F "rebasing it before merging (2/2)" "$tmp_root/behind-rebase-refused/output.log" >/dev/null; then
+  echo "a permanently refused rebase must not be retried" >&2
+  exit 1
+fi
 
 # api_curl must arm curl's transient-error retry. GitLab answers 503 while a
 # rate-limit window is active, and one such reply used to abort the whole run

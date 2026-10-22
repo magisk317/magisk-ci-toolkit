@@ -30,6 +30,20 @@
 # single-shot sibling-status poll failed this job four minutes before the
 # merge request it existed to merge had even been created, leaving the
 # request to the next day's schedule.
+#
+# A request that fell behind the target branch is another class the retries
+# could never fix: these projects merge with merge_method=ff, which requires
+# the source branch to already contain the target tip, and neither
+# merge_status ("can_be_merged") nor detailed_merge_status ("mergeable")
+# reports that - GitLab refuses the PUT with HTTP 422 {"message":"Branch
+# cannot be merged"}. The toolkit's default branch moves, so this is the
+# normal state of a request the schedule did not catch on its first run.
+# Before each merge attempt the script measures behindness with a compare
+# against the target branch and fast-forwards the request through GitLab's
+# rebase endpoint, rotating tokens the way the merge does (a rebase pushes to
+# the source branch, which a token that only holds merge rights may not be
+# allowed to touch). Set MAGISK_SELF_MERGE_AUTOREBASE=false to restore the
+# blind retry behaviour.
 set -euo pipefail
 
 readonly CONTROLLER_PROJECT_ID="83955109"
@@ -41,6 +55,13 @@ readonly DEFAULT_MERGE_ATTEMPTS=6
 readonly DEFAULT_MERGE_DELAY_SECONDS=2
 readonly DEFAULT_PAGE_SIZE=100
 readonly DEFAULT_MAX_PAGES=1000
+readonly DEFAULT_REBASE_POLLS=20
+readonly HARD_MAX_REBASE_POLLS=100
+
+# Rebases per merge request, per merge call. A busy default branch can outrun
+# one rebase, so a bounded retry is useful; an unbounded one would turn a
+# permanently busy branch into an endless loop of branch rewrites.
+readonly MERGE_REBASE_LIMIT=2
 readonly ACTIVE_PIPELINE_STATUSES='"created","waiting_for_resource","preparing","pending","running","manual","scheduled"'
 readonly RENOVATE_PIPELINE_SOURCES='"schedule","web","api"'
 
@@ -100,6 +121,16 @@ require_unsigned_integer "MAGISK_CI_PIPELINE_MAX_PAGES" "$max_pages"
 ((merge_attempts > 0)) || fail "MAGISK_SELF_MERGE_ATTEMPTS must be greater than zero"
 ((page_size > 0 && page_size <= 100)) || fail "MAGISK_CI_PIPELINE_PAGE_SIZE must be between 1 and 100"
 ((max_pages > 0)) || fail "MAGISK_CI_PIPELINE_MAX_PAGES must be greater than zero"
+
+autorebase="${MAGISK_SELF_MERGE_AUTOREBASE:-true}"
+case "$autorebase" in
+  true | false) ;;
+  *) fail "MAGISK_SELF_MERGE_AUTOREBASE must be true or false" ;;
+esac
+rebase_polls="${MAGISK_SELF_MERGE_REBASE_POLLS:-$DEFAULT_REBASE_POLLS}"
+require_unsigned_integer "MAGISK_SELF_MERGE_REBASE_POLLS" "$rebase_polls"
+((rebase_polls > 0 && rebase_polls <= HARD_MAX_REBASE_POLLS)) || \
+  fail "MAGISK_SELF_MERGE_REBASE_POLLS must be between 1 and ${HARD_MAX_REBASE_POLLS}"
 
 api_base="${CI_API_V4_URL%/}/projects/${CI_PROJECT_ID}"
 
@@ -228,6 +259,143 @@ sibling_job_status() {
     ' "$output_file"
 }
 
+# merge_request_is_behind <mr_sha>: report whether the request HEAD still lacks
+# commits that are already on ${CI_COMMIT_REF_NAME}. A fast-forward merge is
+# refused in exactly that case and no merge request field says so, so the
+# comparison is the only authoritative read: commits reachable from the target
+# branch but not from the request HEAD are the commits the request is missing.
+# Returns 0 (behind), 1 (up to date) or 2 (not measurable - the caller then
+# keeps the old behaviour and lets the merge endpoint judge).
+merge_request_is_behind() {
+  local mr_sha="$1"
+  local compare_file="$tmp_dir/behind-${mr_sha}.json"
+
+  require_sha "merge request HEAD sha" "$mr_sha"
+  if ! get_with_tokens mr_read_tokens "$compare_file" \
+    --get \
+    --data-urlencode "from=${mr_sha}" \
+    --data-urlencode "to=${CI_COMMIT_REF_NAME}" \
+    "${api_base}/repository/compare"; then
+    echo "Could not compare the merge request HEAD with ${CI_COMMIT_REF_NAME}; skipping the rebase check." >&2
+    return 2
+  fi
+  if ! jq -e 'type == "object"' "$compare_file" >/dev/null 2>&1; then
+    echo "Compare response for ${CI_COMMIT_REF_NAME} is invalid; skipping the rebase check." >&2
+    return 2
+  fi
+  if ! jq -e '(.compare_timeout // false) == false' "$compare_file" >/dev/null; then
+    echo "GitLab timed out comparing the merge request with ${CI_COMMIT_REF_NAME}; skipping the rebase check." >&2
+    return 2
+  fi
+  jq -e '((.commits // []) | length) > 0' "$compare_file" >/dev/null
+}
+
+# rebase_merge_request <iid> <mr_sha>: fast-forward the request's source branch
+# onto the target tip through GitLab's rebase endpoint, then wait for the
+# queued operation to land and for the request HEAD to move. skip_ci keeps the
+# rewrite from queueing a fresh pipeline for a branch whose only remaining
+# consumer is this merge. Returns 0 when the branch moved - the caller must
+# re-read the request and merge the new HEAD -, 2 when every token was refused
+# or the request moved on its own, and 1 for everything else, which the caller
+# may try again within its limit.
+rebase_merge_request() {
+  local iid="$1"
+  local mr_sha="$2"
+  local response_file="$tmp_dir/rebase-${iid}.json"
+  local status_file
+  local http_status
+  local message
+  local poll
+  local new_sha
+  local token
+  local saw_auth_rejection
+  local last_auth_status=""
+
+  # A rebase rewrites the source branch, which is not the same permission as
+  # merging it: the merge-request token that can land the PUT may not be
+  # allowed to push to the branch. Rotate the merge tokens exactly like the
+  # merge attempt below does, and only treat the refusal as permanent when
+  # every token was turned away.
+  saw_auth_rejection=1
+  for token in "${mr_merge_tokens[@]}"; do
+    api_curl_token="$token"
+    if ! http_status="$(api_write_with_retry api_curl "$response_file" \
+      --request PUT \
+      --data-urlencode 'skip_ci=true' \
+      "${api_base}/merge_requests/${iid}/rebase")"; then
+      http_status="${http_status:-000}"
+    fi
+
+    case "$http_status" in
+      202)
+        # GitLab queued the operation; a 2xx that is not 202 would be a
+        # synchronous rebase, which the endpoint does not offer.
+        saw_auth_rejection=0
+        break
+        ;;
+      401 | 403)
+        message="$(jq -r '.message // .error // "rebase was refused"' "$response_file" 2>/dev/null || printf '%s' 'rebase was refused')"
+        echo "Rebase request for !${iid} with the current token returned HTTP ${http_status}: ${message}"
+        last_auth_status="$http_status"
+        ;;
+      404 | 405 | 409 | 422 | 429 | 5?? | 000)
+        # 409 is GitLab refusing to enqueue the operation while a long
+        # transaction holds the merge-request lock, and 000 is the retry
+        # ladder exhausting its attempts: both can change on a later try.
+        message="$(jq -r '.message // .error // "rebase was refused"' "$response_file" 2>/dev/null || printf '%s' 'rebase was refused')"
+        echo "Rebase request for !${iid} returned HTTP ${http_status}: ${message}" >&2
+        return 1
+        ;;
+      *)
+        message="$(jq -r '.message // .error // "unexpected response"' "$response_file" 2>/dev/null || printf '%s' 'unexpected response')"
+        echo "Rebase request for !${iid} returned HTTP ${http_status}: ${message}" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if ((saw_auth_rejection)); then
+    message="$(jq -r '.message // .error // "rebase was refused"' "$response_file" 2>/dev/null || printf '%s' 'rebase was refused')"
+    echo "No available token can rebase merge request !${iid} (HTTP ${last_auth_status}: ${message}); it stays behind ${CI_COMMIT_REF_NAME}." >&2
+    return 2
+  fi
+
+  for ((poll = 1; poll <= rebase_polls; poll++)); do
+    if ((poll > 1 && merge_delay > 0)); then
+      sleep "$merge_delay"
+    fi
+    status_file="$tmp_dir/rebase-status-${iid}-${poll}.json"
+    if ! get_with_tokens mr_read_tokens "$status_file" \
+      --get \
+      --data-urlencode 'include_rebase_in_progress=true' \
+      "${api_base}/merge_requests/${iid}"; then
+      echo "Could not read the rebase status of !${iid}." >&2
+      return 1
+    fi
+    if [[ "$(jq -r '.rebase_in_progress // false' "$status_file")" == "true" ]]; then
+      continue
+    fi
+    message="$(jq -r '.merge_error // empty' "$status_file" 2>/dev/null || printf '%s' '')"
+    if [[ -n "$message" ]]; then
+      echo "Rebase of !${iid} failed: ${message}" >&2
+      return 1
+    fi
+    new_sha="$(jq -r '(.sha // "") | ascii_downcase' "$status_file" 2>/dev/null || printf '%s' '')"
+    if [[ "$new_sha" =~ ^[0-9a-f]{40,64}$ && "$new_sha" != "$mr_sha" ]]; then
+      echo "Rebased merge request !${iid} onto ${CI_COMMIT_REF_NAME} at ${new_sha}."
+      return 0
+    fi
+    # The operation finished without moving the branch: GitLab already saw the
+    # source branch as up to date, so there is nothing here for the merge to
+    # wait for and the attempt proceeds against the unchanged HEAD.
+    echo "Rebase of !${iid} finished without moving the branch." >&2
+    return 1
+  done
+
+  echo "Rebase of !${iid} did not finish within ${rebase_polls} status reads." >&2
+  return 1
+}
+
 merge_merge_request() {
   local iid="$1"
   local attempt
@@ -244,6 +412,8 @@ merge_merge_request() {
   local token
   local saw_auth_rejection
   local saw_readiness_failure
+  local rebased=0
+  local rebase_status
 
   for ((attempt = 1; attempt <= merge_attempts; attempt++)); do
     response_file="$tmp_dir/mr-${iid}-${attempt}.json"
@@ -288,6 +458,28 @@ merge_merge_request() {
 
     mr_sha="$(jq -r '.sha | ascii_downcase' "$response_file")"
     require_sha "merge request !${iid} HEAD sha" "$mr_sha"
+
+    # A request that fell behind the target branch can never fast-forward
+    # merge, and neither merge_status nor detailed_merge_status reports that
+    # (see the header comment), so the old behaviour was to re-fire the same
+    # doomed PUT until the backoff ladder ran out.
+    if [[ "$autorebase" == "true" ]] && ((rebased < MERGE_REBASE_LIMIT)) &&
+      merge_request_is_behind "$mr_sha"; then
+      rebased=$((rebased + 1))
+      echo "Merge request !${iid} is behind ${CI_COMMIT_REF_NAME}; rebasing it before merging (${rebased}/${MERGE_REBASE_LIMIT})."
+      rebase_status=0
+      rebase_merge_request "$iid" "$mr_sha" || rebase_status=$?
+      if ((rebase_status == 0)); then
+        # The branch moved: re-read the request and pin the merge to the new
+        # HEAD instead of the sha that was just rewritten underneath it.
+        continue
+      fi
+      if ((rebase_status == 2)); then
+        rebased="$MERGE_REBASE_LIMIT"
+      fi
+      # Anything else leaves the request exactly where the pre-fix loop found
+      # it: the merge attempt below runs with the unchanged HEAD.
+    fi
 
     saw_auth_rejection=0
     saw_readiness_failure=0

@@ -18,6 +18,10 @@ method="GET"
 url=""
 write_out=""
 state=""
+compare_from=""
+merge_sha=""
+skip_ci=""
+token=""
 
 while (($# > 0)); do
   case "$1" in
@@ -32,6 +36,9 @@ while (($# > 0)); do
     --data-urlencode)
       case "$2" in
         state=*) state="${2#state=}" ;;
+        from=*) compare_from="${2#from=}" ;;
+        sha=*) merge_sha="${2#sha=}" ;;
+        skip_ci=*) skip_ci="${2#skip_ci=}" ;;
       esac
       shift 2
       ;;
@@ -39,7 +46,13 @@ while (($# > 0)); do
       write_out="$2"
       shift 2
       ;;
-    --header | --data)
+    --header)
+      case "$2" in
+        'PRIVATE-TOKEN: '*) token="${2#'PRIVATE-TOKEN: '}" ;;
+      esac
+      shift 2
+      ;;
+    --data)
       shift 2
       ;;
     --fail | --silent | --show-error | --location | --get)
@@ -61,6 +74,12 @@ done
   exit 64
 }
 
+# The stored merge request file is the single source of truth for the request
+# HEAD: the rebase route rewrites it, so every later read - and the sha-pinned
+# merge - sees the new branch tip the way GitLab does.
+readonly MR_REBASED_SHA="${MOCK_REBASED_SHA:-dddddddddddddddddddddddddddddddddddddddd}"
+mr_is_rebased() { [[ -e "$MOCK_REBASED_FILE" ]]; }
+
 # Transient-failure injection: when the URL matches MOCK_CURL_FAIL_URL_MATCH
 # (an ERE) and this case's failure count is still below MOCK_CURL_FAIL_TIMES,
 # simulate a curl transport failure - default exit 7, the "connection refused"
@@ -79,6 +98,14 @@ fi
 respond() {
   printf '%s' "$1" >"$output_file"
   if [[ "$write_out" == "%{http_code}" ]]; then printf '200'; fi
+}
+
+# respond_with <http-status> <jq-object>: write the body and report the status
+# through --write-out, the way a GitLab 4xx answers with a JSON body instead of
+# a curl-level failure.
+respond_with() {
+  printf '%s' "$(jq -nc "$2")" >"$output_file"
+  if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' "$1"; fi
 }
 
 if [[ "$method" == "GET" && "$url" =~ /pipelines/([0-9]+)/jobs ]]; then
@@ -139,8 +166,69 @@ if [[ "$method" == "GET" && "$url" =~ /pipelines ]]; then
   exit 0
 fi
 
+# Behindness is modelled with the only signal a fast-forward project gives the
+# controller: the compare against the target branch. MOCK_BEHIND=1 keeps the
+# request missing a commit until its rebase lands (the marker file), which is
+# the state merge_method=ff refuses to merge.
+if [[ "$method" == "GET" && "$url" =~ /repository/compare$ ]]; then
+  if [[ "${MOCK_BEHIND:-}" == "1" ]] && ! mr_is_rebased; then
+    respond "$(jq -nc '{compare_timeout: false, commits: [{id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", title: "a commit the request is missing"}]}')"
+  else
+    respond "$(jq -nc '{compare_timeout: false, commits: []}')"
+  fi
+  exit 0
+fi
+
+if [[ "$method" == "PUT" && "$url" =~ /merge_requests/([0-9]+)/rebase$ ]]; then
+  iid="${BASH_REMATCH[1]}"
+  detail_file="$MOCK_MR_DETAILS_DIR/${iid}.json"
+  count="$(cat "$MOCK_REBASE_COUNT_FILE")"
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$MOCK_REBASE_COUNT_FILE"
+  [[ "$skip_ci" == "true" ]] || {
+    echo "mock curl: a branch rewrite must be queued with skip_ci=true" >&2
+    exit 64
+  }
+  if [[ "${MOCK_BEHIND:-}" != "1" ]]; then
+    echo "mock curl: rebasing a request that is not behind is a controller bug" >&2
+    exit 64
+  fi
+  if [[ -n "${MOCK_REBASE_FORBIDDEN_TOKENS:-}" ]] &&
+    [[ ",${MOCK_REBASE_FORBIDDEN_TOKENS}," == *",${token},"* ]]; then
+    # The merge rights a request needs and the push rights a branch rewrite
+    # needs are different grants: this is the merge-only token being turned
+    # away while the request stays behind.
+    respond_with 403 '{message: "Cannot push to source branch."}'
+    exit 0
+  fi
+  status="${MOCK_REBASE_HTTP_STATUS:-202}"
+  case "$status" in
+    202)
+      jq -c --arg sha "$MR_REBASED_SHA" '.sha = $sha' "$detail_file" >"$detail_file.new"
+      mv "$detail_file.new" "$detail_file"
+      : >"$MOCK_REBASED_FILE"
+      respond_with 202 '{rebase_in_progress: true}'
+      ;;
+    *)
+      respond_with "$status" '{message: "rebase rejected by mock"}'
+      ;;
+  esac
+  exit 0
+fi
+
 if [[ "$method" == "PUT" && "$url" =~ /merge_requests/([0-9]+)/merge$ ]]; then
   iid="${BASH_REMATCH[1]}"
+  detail_file="$MOCK_MR_DETAILS_DIR/${iid}.json"
+  if [[ -n "$merge_sha" && "$merge_sha" != "$(jq -r '.sha' "$detail_file")" ]]; then
+    # The controller pinned a sha the branch no longer points at: it merged
+    # without re-reading after a rewrite.
+    respond_with 409 '{message: "The merged sha does not match the source branch HEAD."}'
+    exit 0
+  fi
+  if [[ "${MOCK_BEHIND:-}" == "1" ]] && ! mr_is_rebased; then
+    respond_with 422 '{message: "Branch cannot be merged"}'
+    exit 0
+  fi
   count="$(cat "$MOCK_MERGE_COUNT_FILE")"
   count=$((count + 1))
   printf '%s\n' "$count" >"$MOCK_MERGE_COUNT_FILE"
@@ -151,7 +239,7 @@ if [[ "$method" == "PUT" && "$url" =~ /merge_requests/([0-9]+)/merge$ ]]; then
   fi
   status="${statuses[$index]}"
   if [[ "$status" == "200" ]]; then
-    printf '%s' "$(jq -c '.state = "merged"' "$MOCK_MR_DETAILS_DIR/${iid}.json")" >"$output_file"
+    printf '%s' "$(jq -c '.state = "merged"' "$detail_file")" >"$output_file"
   else
     printf '%s' "$(jq -nc '{message: "merge is not ready"}')" >"$output_file"
   fi
@@ -189,6 +277,7 @@ start_case() {
   case_dir="$tmp_root/$name"
   mkdir -p "$case_dir/mr-details" "$case_dir/candidate-jobs"
   printf '0\n' >"$case_dir/merge-count"
+  printf '0\n' >"$case_dir/rebase-count"
   printf '0\n' >"$case_dir/cancel-count"
   printf '0\n' >"$case_dir/sibling-calls"
   printf '0\n' >"$case_dir/mr-list-calls"
@@ -222,6 +311,11 @@ run_self_merge() {
     MOCK_PIPELINES_FILE="$case_dir/pipelines.json" \
     MOCK_CANDIDATE_JOBS_DIR="$case_dir/candidate-jobs" \
     MOCK_MERGE_COUNT_FILE="$case_dir/merge-count" \
+    MOCK_REBASE_COUNT_FILE="$case_dir/rebase-count" \
+    MOCK_REBASED_FILE="$case_dir/rebased" \
+    MOCK_BEHIND="${MOCK_BEHIND:-}" \
+    MOCK_REBASE_HTTP_STATUS="${MOCK_REBASE_HTTP_STATUS:-}" \
+    MOCK_REBASE_FORBIDDEN_TOKENS="${MOCK_REBASE_FORBIDDEN_TOKENS:-}" \
     MOCK_CANCEL_COUNT_FILE="$case_dir/cancel-count" \
     MOCK_SLEEP_LOG="$case_dir/sleep.log" \
     MOCK_MERGE_STATUSES="${MOCK_MERGE_STATUSES:-200}" \
@@ -241,6 +335,8 @@ run_self_merge() {
     MAGISK_CI_PIPELINE_CONTROL_TOKEN="${SELF_MERGE_TEST_CONTROL_TOKEN-control-token}" \
     RENOVATE_TOKEN="renovate-token" \
     MAGISK_SELF_MERGE_POLL_INTERVAL_SECONDS="0" \
+    MAGISK_SELF_MERGE_AUTOREBASE="${MAGISK_SELF_MERGE_AUTOREBASE:-true}" \
+    MAGISK_SELF_MERGE_REBASE_POLLS="${SELF_MERGE_TEST_REBASE_POLLS:-2}" \
     MAGISK_SELF_MERGE_DELAY_SECONDS="${SELF_MERGE_TEST_MERGE_DELAY:-0}" \
     bash "$merger_script" >"$case_dir/output.log" 2>&1
   run_status=$?
@@ -279,6 +375,24 @@ assert_cancel_count() {
     cat "$case_dir/cancel-count" >&2
     exit 1
   }
+}
+
+assert_rebase_count() {
+  local expected="$1"
+  [[ "$(cat "$case_dir/rebase-count")" == "$expected" ]] || {
+    echo "Expected ${expected} rebase calls" >&2
+    cat "$case_dir/rebase-count" >&2
+    exit 1
+  }
+}
+
+assert_output_absent() {
+  local unexpected="$1"
+  if grep -F "$unexpected" "$case_dir/output.log" >/dev/null; then
+    echo "Expected output not to contain: ${unexpected}" >&2
+    cat "$case_dir/output.log" >&2
+    exit 1
+  fi
 }
 
 assert_output_contains() {
@@ -439,5 +553,62 @@ assert_failure
 assert_merge_count 0
 assert_output_contains "kept failing at the transport level after 6 attempts"
 grep -Fx '32' "$case_dir/sleep.log" >/dev/null
+
+
+# A request that fell behind the target branch cannot be fast-forwarded merged:
+# GitLab refuses every attempt with HTTP 422 "Branch cannot be merged" while
+# merge_status still reads can_be_merged and detailed_merge_status mergeable.
+# The controller now measures behindness with a compare and fast-forwards the
+# request through the rebase endpoint, then re-reads it and merges the new HEAD
+# - the deadlock that cost the toolkit its own Renovate requests every night.
+start_case "merges-behind-mr-after-rebasing"
+printf '%s\n' running success >"$case_dir/sibling-status"
+printf '%s\n' "[${default_mr}]" '[]' '[]' '[]' >"$case_dir/mr-list-seq"
+MOCK_BEHIND=1 run_self_merge
+assert_success
+assert_rebase_count 1
+assert_merge_count 1
+assert_output_contains "Merge request !12 is behind main; rebasing it before merging (1/2)."
+assert_output_contains "Rebased merge request !12 onto main at dddd"
+assert_output_contains "Merged merge request !12 at dddd"
+assert_output_contains "No open Renovate merge requests remain for main"
+
+# A merge-only token can land the PUT but is refused when pushing the source
+# branch. The rebase has to rotate tokens the way the merge does and succeed
+# with the one that can push, instead of declaring the request unfixable.
+start_case "behind-mr-rebase-rotates-to-a-token-that-can-push"
+printf '%s\n' running success >"$case_dir/sibling-status"
+printf '%s\n' "[${default_mr}]" '[]' '[]' '[]' >"$case_dir/mr-list-seq"
+MOCK_BEHIND=1 MOCK_REBASE_FORBIDDEN_TOKENS="merge-token" run_self_merge
+assert_success
+assert_rebase_count 2
+assert_output_contains "Rebase request for !12 with the current token returned HTTP 403: Cannot push to source branch."
+assert_output_contains "Rebased merge request !12 onto main at dddd"
+assert_merge_count 1
+
+# Only when every token is turned away is the refusal permanent: the controller
+# stops rewriting and reports the state an operator has to fix (a token without
+# push rights), instead of burning rebases on a branch it cannot move.
+start_case "behind-mr-rebase-refused-by-every-token"
+printf '%s\n' running success >"$case_dir/sibling-status"
+printf '%s\n' "[${default_mr}]" "[${default_mr}]" "[${default_mr}]" '[]' >"$case_dir/mr-list-seq"
+MOCK_BEHIND=1 MOCK_REBASE_HTTP_STATUS=403 run_self_merge
+assert_failure
+assert_output_contains "No available token can rebase merge request !12 (HTTP 403: rebase rejected by mock); it stays behind main."
+assert_output_absent "(2/2)"
+assert_output_contains "open Renovate merge requests remain and need a manual merge: !12"
+
+# MAGISK_SELF_MERGE_AUTOREBASE=false restores the pre-fix behaviour, and the
+# request stays open: the 422 is still classified as transient readiness, the
+# attempts still run out, and the final sweep reports it for a human.
+start_case "behind-mr-is-not-rebased-when-autorebase-is-off"
+printf '%s\n' running success >"$case_dir/sibling-status"
+printf '%s\n' "[${default_mr}]" "[${default_mr}]" "[${default_mr}]" '[]' >"$case_dir/mr-list-seq"
+MOCK_BEHIND=1 MAGISK_SELF_MERGE_AUTOREBASE=false run_self_merge
+assert_failure
+assert_rebase_count 0
+assert_output_absent "rebasing it before merging"
+assert_output_contains "Merge attempt 6/6 for !12 returned HTTP 422: Branch cannot be merged"
+assert_output_contains "open Renovate merge requests remain and need a manual merge: !12"
 
 echo "auto_merge_self_renovate_mrs tests passed"
