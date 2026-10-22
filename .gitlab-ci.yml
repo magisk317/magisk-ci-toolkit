@@ -145,6 +145,10 @@ renovate:gitlab:
     MAGISK_CANCEL_OLDER_MR_PIPELINES: "true"
     # Consumers pin one exact toolkit SHA; the toolkit drives its own loop from main.
     MAGISK_CI_TOOLKIT_REF: "main"
+    # Renovate skips github-tags/github-releases deps when no GitHub token is
+    # present. GITHUB_PAT is a protected group variable; this job runs on the
+    # protected default branch, so it is available here.
+    GITHUB_TOKEN: "$GITHUB_PAT"
 
 # Self-Renovate auto-merge: a multi-project bridge cannot target the project
 # its own pipeline runs in (probe-verified on this instance: a self trigger is
