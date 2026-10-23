@@ -1,0 +1,20 @@
+// version-allocator — the single versionCode axis for every magisk project.
+//
+// Deploy (needs node + wrangler, which this host does not have; the 2026-10-23
+// deploy went through the Cloudflare MCP API instead):
+//   wrangler deploy
+//   wrangler secret put ALLOCATE_TOKEN
+//
+// D1: database "magisk-version-codes", tables:
+//   projects(name PRIMARY KEY, seed, note)     -- seed = the floor for that project
+//   allocations(project, scope, code, created_at, PRIMARY KEY (project, scope))
+// See AGENTS.md ("Gradle version axis") for ids, the seeding rule and recovery.
+{
+  "name": "version-allocator",
+  "main": "index.mjs",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true, "logs": { "head_sampling_rate": 1 } },
+  "d1_databases": [
+    { "binding": "DB", "database_id": "aa33936d-f2bc-4f3d-ba23-ffceee046f06", "database_name": "magisk-version-codes" }
+  ]
+}

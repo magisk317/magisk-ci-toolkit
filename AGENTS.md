@@ -257,3 +257,39 @@ against a scratch project (`gradle help`, plus a registered `Test` task whose `e
 printed to prove the injection at runtime). A Groovy parse error in this one file bricks every
 build on the machine and every CI job, and nothing else in it will tell you: the entire lock
 section is deliberately wrapped in a catch that hides failures.
+
+## Gradle version axis (version-allocator)
+
+One `versionCode` axis for every project, allocated by a Cloudflare Worker so CI, release
+and GitHub builds all draw from the same monotonic counter instead of three regimes
+(pipeline iid / Play `max+1` / local `git rev-list --count`) that drift apart — that drift
+is what made a 1.1.1 CI build look older than the 1.1.0 Play release to Google Play.
+
+- Worker `version-allocator`, source in `workers/version-allocator/index.mjs` (this repo is
+  the reviewable copy; deploy through the Cloudflare API/MCP, this host has no node).
+- D1 database `magisk-version-codes` (`aa33936d-f2bc-4f3d-ba23-ffceee046f06`), tables
+  `projects(name, seed, note)` and `allocations(project, scope, code, created_at,
+  PRIMARY KEY (project, scope))`. `seed` is the floor: the first code a project gets.
+- Endpoint `https://version-allocator.android16.workers.dev`, bearer secret
+  `ALLOCATE_TOKEN`. `POST /allocate {project, scope}` → `{code, replayed}`; the same
+  `(project, scope)` returns the same code forever, so a retried pipeline does not burn a
+  number. `GET /state?project=` reports the high-water mark and seed.
+- **Seeding rule**: `seed = max(current Play versionCode, latest pipeline iid) + 1`.
+  MiPushFramework 1623 (Play max 1622), xinyi-relay 1239 (Play max 1238). Never below both,
+  or the first allocated build looks like a downgrade.
+- **Recovery**: the log is the ledger, so losing the database costs a re-seed, never a wrong
+  number. Re-seed with `UPDATE projects SET seed = <max(Play max, iid) + 1> WHERE name = ?`,
+  then the next allocation lands above it. Numbers only have to increase, never be
+  contiguous, so a jump is free. Backups: `POST /d1/database/<id>/export
+  {output_format:"polling"}` produces a SQL dump; D1 also exposes `time_travel/bookmark` and
+  `time_travel/restore`.
+- **There is no offline fallback band.** An earlier draft proposed one; a build that ever
+  used it would drag the whole online axis up to that band and burn everything below. If the
+  allocator is unreachable, fail the build and retry.
+- Volume is a non-issue on the free tier: ~35 pipelines/day across the three Android repos,
+  one allocation per pipeline, against 100k Worker requests/day and 100k D1 writes/day.
+- Wiring is NOT done yet. Consumers still pass `-PversionCode=$CI_PIPELINE_IID`; the
+  allocator is deployed and tested but no build reads it. Before wiring, `AppUpdateChecker`
+  must stop comparing `pipelineIid` against `currentVersionCode` (it would report every CI
+  build as up to date once codes stop being iids) and read the code from the staged manifest
+  instead. xmsf stays out: `pushVersionCode` is Xiaomi's own scale.
