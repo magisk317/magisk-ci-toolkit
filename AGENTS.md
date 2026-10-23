@@ -293,3 +293,28 @@ is what made a 1.1.1 CI build look older than the 1.1.0 Play release to Google P
   must stop comparing `pipelineIid` against `currentVersionCode` (it would report every CI
   build as up to date once codes stop being iids) and read the code from the staged manifest
   instead. xmsf stays out: `pushVersionCode` is Xiaomi's own scale.
+
+### Wiring a consumer onto the axis
+
+A consumer opts in with one variable on its `android:build` job — the template does the rest:
+
+```yaml
+  variables:
+    # One allocated versionCode per pipeline: stable across a retry because the
+    # scope is the pipeline iid, and shared by the APK, the staged manifest and
+    # the in-app update gate.
+    MAGISK_VERSION_SCOPE: "gitlab:$CI_PROJECT_ID:$CI_PIPELINE_IID"
+```
+
+The template appends `-PversionCode=<allocated>` last (Gradle takes the last one), exports
+`MAGISK_VERSION_CODE` for `after_script`, and fails the job when the allocator cannot be
+reached. Consumers must also stage that number instead of the iid: `stage_ci_dist.sh` writes
+`$MAGISK_VERSION_CODE` into `versionCode` and `minSupportedVersionCode`, because the in-app
+updater now judges a build by the staged manifest's code, not the pipeline iid.
+
+`MAGISK_VERSION_ALLOCATOR_TOKEN` is a masked group variable; every job container already
+carries the corporate proxy in its environment and the client honours it. If the proxy ever
+refuses `*.workers.dev`, add the host to `no_proxy` rather than adding a fallback code path.
+
+The toolkit change reaches consumers only through the pin: bump the 40-hex `ref:` in the
+consumer's `include:` list (all three consumers currently pin `5a9cef57…`).

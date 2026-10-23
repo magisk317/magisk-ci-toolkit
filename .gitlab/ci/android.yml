@@ -362,6 +362,20 @@
   script:
     - |
       set -euo pipefail
+      # Opt-in shared version axis: when the consumer sets MAGISK_VERSION_SCOPE, the
+      # artifact versionCode comes from the allocator instead of whatever
+      # MAGISK_GRADLE_ARGS already carries. Appended last on purpose -- Gradle takes
+      # the last -PversionCode on the command line, so this overrides rather than
+      # duplicates. Exported for after_script (staging writes the same number into
+      # the ci-dist manifest the in-app updater reads).
+      if [ -n "${MAGISK_VERSION_SCOPE:-}" ]; then
+        allocated_code="$(bash "$MAGISK_CI_TOOLKIT_DIR/ci/allocate_version_code.sh" \
+          --project "$CI_PROJECT_NAME" --scope "$MAGISK_VERSION_SCOPE")"
+        export MAGISK_VERSION_CODE="$allocated_code"
+        MAGISK_GRADLE_ARGS="${MAGISK_GRADLE_ARGS:-} -PversionCode=$allocated_code"
+        export MAGISK_GRADLE_ARGS
+        echo "version axis: allocated code=$allocated_code for scope=$MAGISK_VERSION_SCOPE"
+      fi
       : "${MAGISK_GRADLE_ARGS:=--warning-mode all}"
       if [ -z "${MAGISK_ANDROID_BUILD_TASKS:-}" ]; then
         echo "MAGISK_ANDROID_BUILD_TASKS is required" >&2
