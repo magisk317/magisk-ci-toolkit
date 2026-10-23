@@ -15,7 +15,7 @@ bash -n "$script" || fail "$script has a syntax error"
 for needle in \
   'MAGISK_VERSION_ALLOCATOR_TOKEN' \
   '--retry 3' \
-  'jq -r' \
+  '"code"[[:space:]]*:[[:space:]]*([0-9]+)' \
   '^[1-9][0-9]*$' \
   'version allocator returned no usable code'; do
   grep -Fq -- "$needle" "$script" || fail "lost required text: '$needle'"
@@ -23,10 +23,15 @@ done
 # Fail closed: an unusable response must never fall through to a default code.
 grep -Fq 'fail "version allocator returned no usable code' "$script" \
   || fail 'an unusable allocator response must fail the build, not fall back'
+# No jq, in any form. The Android build image that calls this client from
+# .gitlab/ci/android.yml has curl but not jq, so a jq call here is not a style
+# preference, it is the build failing with "jq is required".
+if grep -Eq 'command -v jq|\| *jq( |\$)|jq -' "$script"; then
+  fail 'the allocator client must not shell out to jq: the Android build image has no jq'
+fi
 
 # --- live behaviour against a stub allocator ----------------------------------
 python3 --version >/dev/null 2>&1 || { echo "SKIP: python3 not available for the stub"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not available"; exit 0; }
 
 port=$((20000 + RANDOM % 20000))
 state_file="$(mktemp)"
@@ -63,6 +68,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"error":"unknown project: add a seed row first"}')
             return
+        if mode == "refused_with_number":
+            # A well-formed "not allocated" answer that still carries a number.
+            # The client must read "ok" before "code", or it would push a code
+            # the allocator explicitly refused.
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": false, "reason": "quota", "code": 999}')
+            return
         body = json.dumps({"ok": True, "project": "MiPushFramework", "code": 4242}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -94,6 +108,28 @@ done
 out="$(MAGISK_VERSION_ALLOCATOR_TOKEN=t bash "$script" --project MiPushFramework --scope "gitlab:83955143:862")"
 [ "$out" = "4242" ] || fail "expected 4242 on stdout, got '$out'"
 
+# 1b. The same call with a PATH that carries only curl (plus bash and sleep):
+#     that is the Android build image, which has no jq. .gitlab/ci/android.yml
+#     calls this client from the build job, and the first time it did, every
+#     android:build job died on "ERROR: jq is required" -- so the absence of jq
+#     is tested here instead of assumed.
+minbin="$(mktemp -d)"
+for tool in bash curl sleep; do
+  src="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$src" ] && ln -s "$src" "$minbin/$tool"
+done
+if [ -x "$minbin/curl" ]; then
+  out_nojq="$(env -i PATH="$minbin" \
+    MAGISK_VERSION_ALLOCATOR_TOKEN=t \
+    MAGISK_VERSION_ALLOCATOR_URL="$MAGISK_VERSION_ALLOCATOR_URL" \
+    bash "$script" --project MiPushFramework --scope "gitlab:83955143:1862")"
+  [ "$out_nojq" = "4242" ] \
+    || fail "a jq-free PATH returned '$out_nojq'; the client must parse the response without jq"
+else
+  echo "NOTE: curl not found for the jq-free PATH case; skipped"
+fi
+rm -rf -- "$minbin"
+
 # 2. The same scope replays the same code (idempotency is the allocator's, but the
 #    caller must keep asking with the same scope for it to matter).
 out2="$(MAGISK_VERSION_ALLOCATOR_TOKEN=t bash "$script" --project MiPushFramework --scope "gitlab:83955143:862")"
@@ -117,6 +153,23 @@ done
 if MAGISK_VERSION_ALLOCATOR_TOKEN=t MAGISK_VERSION_ALLOCATOR_ATTEMPTS=2 \
     bash "$script" --project NapGram --scope s 2>/dev/null; then
   fail "a persistent rejection must fail even with retries"
+fi
+kill "$stub_pid" 2>/dev/null || true
+wait "$stub_pid" 2>/dev/null || true
+
+# 5. A refused answer that still carries a number must not be read as a code.
+#    This is the case the bash regex replaced jq for: parsing "ok" is not
+#    optional, and a body-shaped coincidence is not an allocation.
+echo "0" > "$state_file"
+STUB_MODE=refused_with_number python3 "$stub_py" "$port" "$state_file" >"$stub_log" 2>&1 &
+stub_pid=$!
+for _ in $(seq 1 20); do
+  curl -s -o /dev/null -m 1 "http://127.0.0.1:$port/" 2>/dev/null && break
+  sleep 0.2
+done
+if out5="$(MAGISK_VERSION_ALLOCATOR_TOKEN=t MAGISK_VERSION_ALLOCATOR_ATTEMPTS=1 \
+    bash "$script" --project MiPushFramework --scope s 2>/dev/null)"; then
+  fail "ok:false with a code must fail closed, got '$out5'"
 fi
 kill "$stub_pid" 2>/dev/null || true
 wait "$stub_pid" 2>/dev/null || true

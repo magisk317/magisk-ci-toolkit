@@ -37,7 +37,11 @@ done
 [[ "$ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || fail "MAGISK_VERSION_ALLOCATOR_ATTEMPTS must be a positive integer"
 [[ "$SLEEP_SECONDS" =~ ^[0-9]+$ ]] || fail "MAGISK_VERSION_ALLOCATOR_SLEEP_SECONDS must be a non-negative integer"
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v jq >/dev/null 2>&1 || fail "jq is required"
+# No jq. This client also runs inside the Android build image, which ships curl
+# but not jq, and a build that cannot read the answer it just received has to
+# fail closed rather than depend on a tool the image does not carry. The
+# response body is produced by our own allocator Worker, so its shape is known
+# well enough to read with a bash regex.
 
 # A scope has to identify one build attempt and nothing else: the same scope
 # must map to the same code across retries, and two different builds must never
@@ -55,7 +59,14 @@ while :; do
     -H "authorization: Bearer $ALLOCATOR_TOKEN" \
     -H 'content-type: application/json' \
     -d "{\"project\":\"$project\",\"scope\":\"$scope\"}" 2>/dev/null || true)"
-  candidate="$(printf '%s' "$body" | jq -r 'if .ok == true then (.code | tostring) else empty end' 2>/dev/null || true)"
+  # "ok" must be exactly true before a code is trusted: an error body that
+  # happens to mention a number must never be read as an allocation.
+  ok_re='"ok"[[:space:]]*:[[:space:]]*true'
+  code_re='"code"[[:space:]]*:[[:space:]]*([0-9]+)'
+  candidate=""
+  if [[ "$body" =~ $ok_re ]] && [[ "$body" =~ $code_re ]]; then
+    candidate="${BASH_REMATCH[1]}"
+  fi
   if [[ "$candidate" =~ ^[1-9][0-9]*$ ]]; then
     code="$candidate"
     break
