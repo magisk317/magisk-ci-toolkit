@@ -214,6 +214,12 @@ only *effective* one, so keep them byte-identical:
 `gradle/tests/test_build_guard_drift.sh` compares them whenever a deployed copy is readable and
 asserts the invariants below.
 
+Whether that byte comparison runs at all is the scheduler's choice, not a signal: two runner
+instances answer to the same description `magisk-amd64-linux` (54112073 on v19.5.0, 55690513 on
+v19.5.1) and only 55690513 bind-mounts the host Gradle cache at `/opt/gradle-cache`. Jobs scheduled
+onto the older instance print `SKIP drift:` followed by every path it probed; all-absent means the
+container simply has no cache mount, which is normal, not a deployment failure.
+
 Load points decide whether a fix exists at all. A TestKit nested build runs with
 `GRADLE_USER_HOME` = a throwaway `<module>/build/tmp/.../.gradle-test-kit` directory, so what it
 evaluates is the **distribution** copy. A change that lands only in `~/.gradle/init.d` cannot

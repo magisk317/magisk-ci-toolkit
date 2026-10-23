@@ -63,14 +63,18 @@ rethrow_line=$(lineno 't.message.startsWith("MAGISK_BUILD_GUARD_DEADLOCK")')
 
 # --- drift against the deployed copy ------------------------------------------------
 # First readable candidate wins: the container bind mount, the host cache path, then the
-# authoritative source. Nothing readable means the comparison is unavailable here -- say so
-# instead of pretending it passed.
+# authoritative source. Nothing readable means the comparison is unavailable here -- say so,
+# and say what was probed, instead of pretending it passed.
+candidates=()
+[ -n "${MAGISK_GRADLE_LOCK_DIR:-}" ] && candidates+=("$MAGISK_GRADLE_LOCK_DIR/00-build-guard.gradle")
+candidates+=(
+  /opt/gradle-cache/.locks/00-build-guard.gradle
+  /home/brew/.gitlab-runner-magisk/gradle-cache/.locks/00-build-guard.gradle
+  "${MAGISK_GRADLE_SOURCE:-/root/.gradle/init.d/00-build-guard.gradle}"
+)
+
 deployed=""
-for candidate in \
-  "${MAGISK_GRADLE_LOCK_DIR:-}/00-build-guard.gradle" \
-  /opt/gradle-cache/.locks/00-build-guard.gradle \
-  /home/brew/.gitlab-runner-magisk/gradle-cache/.locks/00-build-guard.gradle \
-  "${MAGISK_GRADLE_SOURCE:-/root/.gradle/init.d/00-build-guard.gradle}"; do
+for candidate in "${candidates[@]}"; do
   if [ -r "$candidate" ]; then
     deployed="$candidate"
     break
@@ -78,8 +82,21 @@ for candidate in \
 done
 
 if [ -z "$deployed" ]; then
-  echo "SKIP drift: no deployed copy readable here (normal off the runner host; the host still"
-  echo "     owes gradle-lock-sync, verified by 'gradle-lock-sync status' reporting 0 anomalies)."
+  echo "SKIP drift: no deployed copy readable here. Probed:"
+  for candidate in "${candidates[@]}"; do
+    if [ -e "$candidate" ]; then
+      echo "  $candidate exists but is not readable"
+    else
+      echo "  $candidate does not exist"
+    fi
+  done
+  # Two group runner instances answer to the same description magisk-amd64-linux, and only
+  # the one that bind-mounts the host Gradle cache can see these paths, so which arm of this
+  # branch a pipeline takes is the runner scheduler's choice. The contract checks above run
+  # everywhere; the byte comparison stays host-authoritative -- gradle-lock-sync sync plus
+  # 'gradle-lock-sync status' reporting 0 anomalies is what actually keeps them identical.
+  echo "  Drift is therefore checked on the runner host, not in every container: run"
+  echo "  'gradle-lock-sync sync' after editing $guard and require 0 anomalies in status."
 elif cmp -s "$guard" "$deployed"; then
   echo "OK drift: deployed copy $deployed matches the repository byte for byte."
 else
