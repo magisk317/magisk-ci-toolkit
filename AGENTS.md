@@ -15,6 +15,12 @@ checkout, Android CI, release, security, notification, and code-generation behav
   or a history rewrite means one explicit bump commit per consumer, and that bump is the point.
 - GitLab consumers must use that same ref for both `include.ref` and the top-level
   `MAGISK_CI_TOOLKIT_REF`; otherwise the included YAML and the runtime checkout can drift apart.
+- The GitHub side has no escape hatch from the pin. A cross-repository `uses:` ref --
+  `uses: <owner>/magisk-ci-toolkit/.github/workflows/release-android.yml@<ref>` -- cannot be built
+  from an expression, so the SHA is a literal in every caller, and the `toolkit_ref:` input that
+  fetches the scripts at runtime is a second copy of it. Both must equal `MAGISK_CI_TOOLKIT_REF`.
+  `ci/verify_toolkit_pin.sh` checks the GitLab includes and every GitHub toolkit ref; a workflow
+  that resolves a ref at runtime (`${{ ... }}`) is reported as dynamic rather than verified.
 - Tags and full commit SHAs must be fetched directly and checked out detached. Do not pass them to
   `git clone --branch`, and do not silently fall back from a missing ref to `main` or another moving
   ref.
@@ -35,6 +41,17 @@ checkout, Android CI, release, security, notification, and code-generation behav
   release jobs (`*:release:*`). Failure propagation between release channels is each job's own
   `allow_failure` semantics, never the pipeline graph. Consumers keep their own `needs` wiring (job
   names differ per project); this repository owns the job-level semantics and the audit trail.
+- `.github/workflows/release-android.yml` is the GitHub twin of `.gitlab/ci/android-release.yml`:
+  a `workflow_call` chain whose input names map 1:1 onto the GitLab `MAGISK_*` variables, so a
+  consumer can run the same release axis on `github_actions` runners when the GitLab Runner fleet is
+  gone. It is a fallback, not a second owner -- `RELEASE_OWNER` decides who publishes. Two things it
+  deliberately does not do: it never creates or signs the release tag (a local `release/release_tag.sh`
+  signed annotated tag is pushed to GitHub, and the Xposed-Modules-Repo job refuses a ref that is not a
+  signed tag object), and it does not send Telegram notifications (that stays in the consumer's own
+  workflow, because notification threads are per-project). It calls `release/resolve_play_release.sh`
+  exactly once, in `release-meta`, so concurrent build jobs cannot disagree on versionCode, and it
+  submits Play through `release/publish_play.sh` rather than installing fastlane.
+  See `docs/hosting-cutover.md`.
 
 ## CI Java Runtime
 
@@ -316,5 +333,8 @@ updater now judges a build by the staged manifest's code, not the pipeline iid.
 carries the corporate proxy in its environment and the client honours it. If the proxy ever
 refuses `*.workers.dev`, add the host to `no_proxy` rather than adding a fallback code path.
 
-The toolkit change reaches consumers only through the pin: bump the 40-hex `ref:` in the
-consumer's `include:` list (all three consumers currently pin `5a9cef57…`).
+The toolkit change reaches consumers only through the pin: bump the 40-hex `ref:` in the consumer's
+`include:` list, its `MAGISK_CI_TOOLKIT_REF`, and every GitHub `uses:` / `toolkit_ref:` copy, in the
+same commit. Read the live value from the consumers rather than trusting a SHA written here --
+`grep -rn MAGISK_CI_TOOLKIT_REF: */.gitlab-ci.yml` across the consumer set, then run
+`ci/verify_toolkit_pin.sh` from each consumer root.

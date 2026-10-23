@@ -121,11 +121,41 @@ re-enabled workflow is indistinguishable in the mirror's history from a lost com
   publication. Do not switch both platforms on concurrently.
 - Shared repositories are published before parent repositories that pin them.
 - Production toolkit consumers pin one full 40-character commit SHA and repeat it for every GitLab
-  `include.ref`, the top-level `MAGISK_CI_TOOLKIT_REF`, and any generated resolver fallback, so the
-  included YAML and the runtime checkout cannot drift apart. The `v1` tag was deleted on 2026-10-21;
-  `ci/verify_toolkit_pin.sh` enforces exactly this shape, and `AGENTS.md` carries the contract.
+  `include.ref`, the top-level `MAGISK_CI_TOOLKIT_REF`, any generated resolver fallback, and every
+  GitHub-side toolkit ref — a cross-repository `uses: <repo>/magisk-ci-toolkit/<path>@<ref>`, the
+  `ref:`/`toolkit_ref:` input handed to the step that clones the toolkit, or a toolkit `git clone`
+  argument. GitHub Actions cannot build a `uses:` ref from an expression, so the SHA is written
+  literally in the caller workflow and that literal is what the guard reads. The `v1` tag was deleted
+  on 2026-10-21; `ci/verify_toolkit_pin.sh` enforces exactly this shape on both hosts, and `AGENTS.md`
+  carries the contract.
 - Parent-specific build tasks and artifact policy stay in the parent repository. Shared checkout,
   retry, release, notification, and security behavior stays in this toolkit.
+
+## GitHub fallback release chain
+
+The GitHub chain exists for one failure mode: the GitLab runner fleet is unavailable and a release
+still has to ship. It is a fallback, not a cutover — GitLab keeps ownership, and the two hosts run
+the same toolkit scripts at the same pinned SHA so "same behaviour" is a property of the code, not a
+promise in a document.
+
+- `.github/workflows/release-android.yml` is a `workflow_call` chain: guard and release metadata,
+  Play-axis version resolution, APK build with signature validation, optional Play bundle, GitHub
+  Release, Play submission, and the Xposed-Modules-Repo publish. Callers pass the values their
+  `.gitlab-ci.yml` already passes to `.gitlab/ci/android-release.yml`.
+- The tag is never created in Actions. A release tag comes from `release/release_tag.sh` on a
+  workstation, is pushed to GitHub, and the workflow is dispatched with that tag as an explicit input.
+  No signing key is ever placed in a GitHub secret: Xposed-Modules-Repo requires a signed annotated
+  tag object, so the chain refuses to publish a channel tag whose source tag is missing, unsigned, or
+  a lightweight tag, and it pushes that object before it lets `gh release create` run.
+- Publishing is gated three ways: `enabled` carries the caller's `RELEASE_OWNER` check, each channel
+  has its own switch, and `dry_run` builds and verifies without any external write.
+- `RELEASE_OWNER` on the GitLab group variable stays `gitlab` while `sync:github` is active. The sync
+  anchor force-pushes the default branch and every release tag, so a GitHub-side tag or commit created
+  during a fallback has to be reconciled back to GitLab before the next sync runs, or the mirror
+  overwrites it.
+- Telegram release notification is not part of the chain: `send-telegram-notification.yml` is a
+  separate `workflow_call` and the chat id, project tag and pin behaviour are per-repository, so the
+  caller wires it from the release events and reads the outputs the chain exports.
 
 ## Cutover sequence
 

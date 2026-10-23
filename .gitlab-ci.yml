@@ -83,6 +83,9 @@ shell:test:
       ci/tests/test_github_sync_template.sh
       ci/tests/test_linux_release_template.sh
       ci/tests/test_resolve_git_checkout.sh
+      ci/verify_toolkit_pin.sh
+      ci/tests/test_verify_toolkit_pin.sh
+      ci/tests/test_github_release_template.sh
       gradle/tests/test_run_gradle_with_retry.sh
       gradle/tests/test_build_guard_drift.sh
       release/tests/test_release_notes.sh
@@ -110,6 +113,8 @@ shell:test:
     - bash ci/tests/test_trusted_projects.sh
     - bash ci/tests/test_github_sync_template.sh
     - bash ci/tests/test_resolve_git_checkout.sh
+    - bash ci/tests/test_verify_toolkit_pin.sh
+    - bash ci/tests/test_github_release_template.sh
 
 # Redundancy mirror of this repository to GitHub.
 sync:github:
