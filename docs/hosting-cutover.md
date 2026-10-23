@@ -152,7 +152,10 @@ promise in a document.
 - `RELEASE_OWNER` on the GitLab group variable stays `gitlab` while `sync:github` is active. The sync
   anchor force-pushes the default branch and every release tag, so a GitHub-side tag or commit created
   during a fallback has to be reconciled back to GitLab before the next sync runs, or the mirror
-  overwrites it.
+  overwrites it. `release/reconcile_github_refs.sh` produces that write-back list (read-only by
+  default, `--apply` pushes only annotated tags whose commit GitLab already has), and
+  `docs/github-fallback-release.md` is the operator procedure around it: rehearsal, emergency
+  release, and recovery.
 - Telegram release notification is not part of the chain: `send-telegram-notification.yml` is a
   separate `workflow_call` and the chat id, project tag and pin behaviour are per-repository, so the
   caller wires it from the release events and reads the outputs the chain exports.

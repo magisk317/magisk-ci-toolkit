@@ -51,7 +51,17 @@ checkout, Android CI, release, security, notification, and code-generation behav
   workflow, because notification threads are per-project). It calls `release/resolve_play_release.sh`
   exactly once, in `release-meta`, so concurrent build jobs cannot disagree on versionCode, and it
   submits Play through `release/publish_play.sh` rather than installing fastlane.
-  See `docs/hosting-cutover.md`.
+  See `docs/github-fallback-release.md` for the operator procedure (rehearsal, emergency release,
+  write-back) and `docs/hosting-cutover.md` for the mirror contract.
+- `release/reconcile_github_refs.sh` is the recovery half of that contract. `sync:github`
+  force-pushes GitLab's view over the mirror and is never gated by `RELEASE_OWNER`, so anything the
+  fallback produced on GitHub only -- a signed tag, or a hotfix commit -- has to be written back
+  before the next sync run. The script is read-only unless `--apply`, and `--apply` only pushes an
+  annotated tag object whose commit GitLab already has; commits, lightweight tags and the withheld
+  internal prefixes (`backup/ archive/ tmp/ wip/ keep/`, the same list github-sync.yml reads from
+  `MAGISK_GITHUB_MIRROR_EXCLUDED_TAG_PREFIXES`) are reported for a human instead of moved. It fetches
+  both ends under `refs/magisk-reconcile/*` and deletes those refs on exit, and never uses a
+  `--depth` fetch, because leaving a caller's repository shallow would be a side effect.
 
 ## CI Java Runtime
 
