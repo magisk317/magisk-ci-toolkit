@@ -366,12 +366,21 @@
       # artifact versionCode comes from the allocator instead of whatever
       # MAGISK_GRADLE_ARGS already carries. Appended last on purpose -- Gradle takes
       # the last -PversionCode on the command line, so this overrides rather than
-      # duplicates. Exported for after_script (staging writes the same number into
-      # the ci-dist manifest the in-app updater reads).
+      # duplicates.
+      #
+      # The number also has to reach the staging step, which writes it into the
+      # ci-dist manifest the in-app updater reads. GitLab runs after_script in its
+      # own shell: an export made here is not visible there (job `variables:` are,
+      # which is why MAGISK_CI_TOOLKIT_DIR works in after_script and this did not).
+      # So the number crosses through the workspace and ci/allocated_version_code.sh
+      # reads it back. 2026-10-23: relying on the export alone silently dropped
+      # app-ci-manifest.json -- the job stayed green, the artifact list warned, and
+      # the update channel lost the number that gates it.
       if [ -n "${MAGISK_VERSION_SCOPE:-}" ]; then
         allocated_code="$(bash "$MAGISK_CI_TOOLKIT_DIR/ci/allocate_version_code.sh" \
           --project "$CI_PROJECT_NAME" --scope "$MAGISK_VERSION_SCOPE")"
         export MAGISK_VERSION_CODE="$allocated_code"
+        printf '%s\n' "$allocated_code" > "${MAGISK_VERSION_CODE_FILE:-$CI_PROJECT_DIR/.magisk-version-code}"
         MAGISK_GRADLE_ARGS="${MAGISK_GRADLE_ARGS:-} -PversionCode=$allocated_code"
         export MAGISK_GRADLE_ARGS
         echo "version axis: allocated code=$allocated_code for scope=$MAGISK_VERSION_SCOPE"

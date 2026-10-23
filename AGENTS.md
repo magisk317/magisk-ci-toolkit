@@ -301,9 +301,16 @@ is what made a 1.1.1 CI build look older than the 1.1.0 Play release to Google P
   `ALLOCATE_TOKEN`. `POST /allocate {project, scope}` → `{code, replayed}`; the same
   `(project, scope)` returns the same code forever, so a retried pipeline does not burn a
   number. `GET /state?project=` reports the high-water mark and seed.
-- **Seeding rule**: `seed = max(current Play versionCode, latest pipeline iid) + 1`.
-  MiPushFramework 1623 (Play max 1622), xinyi-relay 1239 (Play max 1238). Never below both,
-  or the first allocated build looks like a downgrade.
+- **Seeding rule**: `seed = max(current Play versionCode, latest pipeline iid) + 1`, and the row
+  must exist *before* the consumer sets `MAGISK_VERSION_SCOPE`: the Worker refuses an unseeded
+  project (`{"error":"unknown project: add a seed row first"}`) so a typo cannot silently start a
+  second axis at code 1, which means a wired-but-unseeded project fails every `android:build`.
+  Seeded: MiPushFramework 1623 (Play max 1622), xinyi-relay 1239 (Play max 1238), XposedSmsCode
+  778 (Play cross-track max 777, newest iid 777 -- XposedSmsCode was wired onto the axis before
+  anyone seeded it, and every `android:build` it ran that day failed on the refusal above). Use
+  the Play max across *all* tracks, not just production: the beta track is uploaded from the iid
+  scale and outranks production there. Never below both, or the first allocated build looks like
+  a downgrade.
 - **Recovery**: the log is the ledger, so losing the database costs a re-seed, never a wrong
   number. Re-seed with `UPDATE projects SET seed = <max(Play max, iid) + 1> WHERE name = ?`,
   then the next allocation lands above it. Numbers only have to increase, never be
@@ -315,11 +322,13 @@ is what made a 1.1.1 CI build look older than the 1.1.0 Play release to Google P
   allocator is unreachable, fail the build and retry.
 - Volume is a non-issue on the free tier: ~35 pipelines/day across the three Android repos,
   one allocation per pipeline, against 100k Worker requests/day and 100k D1 writes/day.
-- Wiring is NOT done yet. Consumers still pass `-PversionCode=$CI_PIPELINE_IID`; the
-  allocator is deployed and tested but no build reads it. Before wiring, `AppUpdateChecker`
-  must stop comparing `pipelineIid` against `currentVersionCode` (it would report every CI
-  build as up to date once codes stop being iids) and read the code from the staged manifest
-  instead. xmsf stays out: `pushVersionCode` is Xiaomi's own scale.
+- Wiring is done on GitLab for XposedSmsCode and xinyi-relay: both set `MAGISK_VERSION_SCOPE`
+  on `android:build`, and the allocated number lands in the APK (`-PversionCode=778` was the
+  first one through). MiPushFramework is not wired, and xmsf stays out: `pushVersionCode` is
+  Xiaomi's own scale. `AppUpdateChecker` already prefers the staged manifest's code and only
+  falls back to the pipeline iid (`effectiveCiVersionCode(stagedVersionCode, pipelineIid)` in
+  magisk-ui-kit), so a build without a manifest keeps working on the old scale instead of
+  reporting a false "up to date".
 
 ### Wiring a consumer onto the axis
 
@@ -333,11 +342,22 @@ A consumer opts in with one variable on its `android:build` job — the template
     MAGISK_VERSION_SCOPE: "gitlab:$CI_PROJECT_ID:$CI_PIPELINE_IID"
 ```
 
-The template appends `-PversionCode=<allocated>` last (Gradle takes the last one), exports
-`MAGISK_VERSION_CODE` for `after_script`, and fails the job when the allocator cannot be
-reached. Consumers must also stage that number instead of the iid: `stage_ci_dist.sh` writes
-`$MAGISK_VERSION_CODE` into `versionCode` and `minSupportedVersionCode`, because the in-app
-updater now judges a build by the staged manifest's code, not the pipeline iid.
+The template appends `-PversionCode=<allocated>` last (Gradle takes the last one) and fails the
+job when the allocator cannot be reached. It also writes the same number to
+`$CI_PROJECT_DIR/.magisk-version-code`, because GitLab runs `after_script` in its own shell: an
+export made in `script` is not visible there, while job-level `variables:` are (that is why
+`MAGISK_CI_TOOLKIT_DIR` works in `after_script`). Staging reads it back through
+`ci/allocated_version_code.sh`, which prefers `MAGISK_VERSION_CODE` when set, falls to the file,
+and fails with both names in the message when neither is there. Consumers must stage that number
+instead of the iid: their `after_script` writes it into `versionCode` and
+`minSupportedVersionCode`, because the in-app updater now judges a build by the staged
+manifest's code, not the pipeline iid.
+
+2026-10-23: the first wiring exported `MAGISK_VERSION_CODE` and read it in `after_script`, so
+every staged `app-ci-manifest.json` silently vanished -- both consumers built green, the only
+trace was `WARNING: ci-dist/app-ci-manifest.json: no matching files` in the artifact list, and
+the update channel dropped back to the iid scale. That is why the number travels through the
+workspace and why the helper fails rather than defaulting.
 
 `MAGISK_VERSION_ALLOCATOR_TOKEN` is a masked group variable; every job container already
 carries the corporate proxy in its environment and the client honours it. If the proxy ever

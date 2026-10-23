@@ -65,6 +65,7 @@ shell:test:
       ci/cancel_older_renovate_pipelines.sh
       ci/cancel_merged_mr_pipelines.sh
       ci/allocate_version_code.sh
+      ci/allocated_version_code.sh
       ci/auto_merge_upstream_mr.sh
       ci/auto_merge_self_renovate_mrs.sh
       ci/reconcile_trusted_renovate_mrs.sh
@@ -74,6 +75,7 @@ shell:test:
       ci/tests/test_cancel_older_renovate_pipelines.sh
       ci/tests/test_cancel_merged_mr_pipelines.sh
       ci/tests/test_allocate_version_code.sh
+      ci/tests/test_allocated_version_code.sh
       ci/tests/test_ci_predefined_variables.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_auto_merge_self_renovate_mrs.sh
@@ -109,6 +111,7 @@ shell:test:
     - bash gradle/tests/test_run_gradle_with_retry.sh
     - bash gradle/tests/test_build_guard_drift.sh
     - bash ci/tests/test_allocate_version_code.sh
+    - bash ci/tests/test_allocated_version_code.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_modules_repo_tag.sh
     - bash release/tests/test_release_tag.sh
