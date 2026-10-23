@@ -82,6 +82,7 @@ shell:test:
       ci/tests/test_linux_release_template.sh
       ci/tests/test_resolve_git_checkout.sh
       gradle/tests/test_run_gradle_with_retry.sh
+      gradle/tests/test_build_guard_drift.sh
       release/tests/test_release_notes.sh
       release/tests/test_modules_repo_tag.sh
       release/tests/test_release_tag.sh
@@ -98,6 +99,7 @@ shell:test:
     - bash ci/tests/test_gitlab_telegram_release.sh
     - bash ci/tests/test_linux_release_template.sh
     - bash gradle/tests/test_run_gradle_with_retry.sh
+    - bash gradle/tests/test_build_guard_drift.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_modules_repo_tag.sh
     - bash release/tests/test_release_tag.sh

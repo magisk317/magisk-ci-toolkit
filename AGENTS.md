@@ -150,6 +150,7 @@ bash ci/tests/test_resolve_git_checkout.sh
 bash ci/tests/test_resolve_pnpm_version.sh
 bash ci/tests/test_ensure_pnpm.sh
 bash gradle/tests/test_run_gradle_with_retry.sh
+bash gradle/tests/test_build_guard_drift.sh
 bash codegen/tests/test_badges.sh
 git diff --check
 ```
@@ -201,3 +202,52 @@ History (2026-10-09): after the toolchain bump, every consumer pipeline began fa
 this way because `build-tools/37.0.0` on the runner lacked `aapt`, `d8`, `dexdump` and
 `lib/`. An earlier build that same day had passed with the older AGP, which validated
 fewer binaries -- the regression was the validator, not the SDK.
+
+## Gradle Build Guard
+
+`gradle/00-build-guard.gradle` is the global serial-build lock. No consumer `include:`s it: the
+runner host deploys it. `gradle-lock-sync` copies the authoritative host file to every
+`GRADLE_USER_HOME/init.d`, to every unpacked Gradle distribution `init.d`, and to
+`.locks/00-build-guard.gradle`, which the runner's `pre_build_script` copies into each CI slot
+home. That makes the repository copy the only *reviewable* artifact and the deployed copy the
+only *effective* one, so keep them byte-identical:
+`gradle/tests/test_build_guard_drift.sh` compares them whenever a deployed copy is readable and
+asserts the invariants below.
+
+Load points decide whether a fix exists at all. A TestKit nested build runs with
+`GRADLE_USER_HOME` = a throwaway `<module>/build/tmp/.../.gradle-test-kit` directory, so what it
+evaluates is the **distribution** copy. A change that lands only in `~/.gradle/init.d` cannot
+reach the JVM that deadlocks.
+
+Three rules, each paid for by an incident:
+
+- Never open a second `FileChannel` on the lock inode from a JVM that already holds the lock.
+  POSIX record locks belong to the process, not the fd: closing any fd on that inode drops the
+  process's whole lock (2026-10-21, the lock quietly became a no-op). The same-JVM re-entrant
+  path must return before `FileChannel.open`.
+- Excuse nested builds through the *environment*. The re-entrancy marker is a System property and
+  properties do not cross a fork, so the build holding the lock injects `MAGISK_GW_LOCK_HELD=1`
+  into its own `Test` task environments -- on both the acquire path and the re-entrant path,
+  because whichever copy loads first is the one that acquires. Env is the only channel proven to
+  cross job -> client -> daemon -> test worker -> nested daemon (the lock directory itself reaches
+  the nested daemon the same way).
+- Queueing must be bounded and must fail loudly: `MAGISK_GRADLE_LOCK_MAX_WAIT_SEC` (default 3000 s
+  against a measured longest holder of 1248 s), a holder-is-my-ancestor probe after 60 s, and
+  `MAGISK_BUILD_GUARD_DEADLOCK` rethrown past the swallow-all catch. Without them, 2026-10-23 saw
+  `android:test:pure-modules` consume its entire 7200 s job budget with zero trace output -- the
+  nested daemon's `排队中 Ns —— 当前持有者: pid=…` lines only ever reach
+  `<module>/build/tmp/test/work/.gradle-test-kit/test-kit-daemon/<ver>/daemon-<pid>.out.log`.
+
+A guard change does not travel through the pin chain: it deploys to the host, so it is live for
+the next job no matter which SHA a consumer pins, and bumping a pin neither enables nor disables
+it. Order of work: edit here, run `bash gradle/tests/test_build_guard_drift.sh` on the host, then
+install as the authoritative source and `gradle-lock-sync sync`, requiring `gradle-lock-sync status`
+to report 0 anomalies. Keep any backup outside the `*.gradle` glob -- `init.d` loads every
+`*.gradle` file it finds, so `00-build-guard.gradle.bak-<date>` is inert while
+`00-build-guard.gradle.bak` would run twice.
+
+Before overwriting the authoritative file, evaluate the draft in an isolated `GRADLE_USER_HOME`
+against a scratch project (`gradle help`, plus a registered `Test` task whose `environment` is
+printed to prove the injection at runtime). A Groovy parse error in this one file bricks every
+build on the machine and every CI job, and nothing else in it will tell you: the entire lock
+section is deliberately wrapped in a catch that hides failures.

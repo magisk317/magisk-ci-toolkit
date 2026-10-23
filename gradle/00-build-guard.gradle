@@ -1,0 +1,338 @@
+// 00-build-guard.gradle — 全局串行构建锁（强制排队）
+//
+// Gradle 只有两个 init.d 加载点，这份脚本两处都装：
+//   (1) $GRADLE_USER_HOME/init.d/  本机 /root/.gradle/init.d；CI 由 runner pre_build 从 .locks 复制进各 slot
+//   (2) <Gradle 发行版>/init.d/    实测：即使 -g / GRADLE_USER_HOME 换掉 home，这里照样被求值
+// 本脚本每次构建都会把自己补种进"当前正在用的那个发行版"的 init.d，所以 (2) 会随着
+// 版本升级自动补齐，不需要人工再撒（MAGISK_BUILD_GUARD_SEED=0 可关）。
+//
+// 覆盖面：本地 ./gradlew、直连发行版 bin/gradle（含 -g 换 home）、IDE sync、AI 工具、CI runner。
+// 拦不住的仅剩：把 wrapper 发行版解压进一个全新 home（如 GRADLE_USER_HOME=/tmp/x ./gradlew，
+// dists 落在 /tmp/x/wrapper/dists，两处 init.d 都不存在）。要连这个也拦只能换成进程级闸门
+// （改 java 启动器），会波及 daemon 与 build-logic 的 TestKit 嵌套构建，本机还在跑 CI，故未安装。
+// 主锁一直是 gw；这里只是兜底。
+//
+// 锁位置：CI 容器与本机共享同一挂载点
+//   CI   (bind mount) : /opt/gradle-cache/.locks        <- MAGISK_GRADLE_LOCK_DIR
+//   LXC101 本地真实路径: /home/brew/.gitlab-runner-magisk/gradle-cache/.locks
+// FileLock 由内核在持有进程死亡时自动释放，crash/OOM 不会留下死锁。
+//
+// 2026-10-21 修复一：原版会"自己把自己的锁放掉"，三个并发构建全部以为自己持锁。
+//   JDK 的 FileChannel.tryLock() 在 Linux 上发的是 fcntl(F_SETLK)，POSIX 记录锁
+//   属于"进程"，不是属于"fd"：关闭该 inode 的任意一个 fd，进程在这把文件上的
+//   锁全部消失，而 FileLock.isValid() 依然返回 true。
+//   带 build-logic 复合构建的项目，每次构建会把 init 脚本求值两遍。第二遍
+//   open() 成功、tryLock() 抛 OverlappingFileLockException（JVM 层拦的，没落系统
+//   调用），留下一个"有 fd、无锁、无人引用"的失败 channel；它被 GC/cleaner 一关，
+//   第一遍那把锁就当场蒸发 —— 于是这个 daemon 之后永远秒获锁，串行失效。
+//   修法：同一个 JVM 已经持锁时直接复用，绝不再开第二个 channel。
+//
+// 2026-10-21 修复二：原版只装在 GRADLE_USER_HOME/init.d，`gradle -g <别的 home>` 一步就跳出了
+//   锁外（CI 的 slot home 也正是靠 runner 复制才覆盖到的）。加上发行版级加载点 + 自愈补种。
+//
+// 2026-10-23 修复三：本 JVM 的重入标记跨不到子 JVM，TestKit 嵌套构建会锁死它自己的父构建。
+//   现象：MiPushFramework CI 的 android:test:pure-modules 停在 "> Task :build-logic:test" 之后
+//   零输出，一路挂到 CI_JOB_TIMEOUT=7200 被杀（同任务在命中 FROM-CACHE 的 runner 上永远不发作，
+//   所以只有 magisk-amd64-linux 那台红）。:build-logic:test 是 TestKit 功能测试，它会 fork
+//   test worker，worker 再拉起一个"单程 daemon"——那是**第三个 JVM**，看不见 holdKey 这个
+//   System property，于是排队去抢父构建正握着的锁；父构建非要等测试跑完才放锁 -> 互等。
+//   修 A：持锁的构建给本 JVM 派生出去的 Test 任务注入 MAGISK_GW_LOCK_HELD=1（env 能穿过
+//   fork，实测锁目录就是这么传到嵌套 daemon 的，否则嵌套构建根本排不到队），嵌套构建读到
+//   它就走开头的早退分支。豁免只在"本 JVM 确实握着这把锁"时登记。
+//   修 B：排队必须有上限，并且超时要"红"而不是"静默"——没有上限时一次自锁死的唯一表现是
+//   两小时零输出，人只能靠 holder 文件和 jstack 反推。
+//
+// 开关（环境变量）：
+//   MAGISK_GRADLE_LOCK_DIR         锁目录（CI 由 runner 注入，本地走默认路径）
+//   MAGISK_GRADLE_LOCK_STRICT      =0 -> 只提醒不拦截（应急逃生，不建议）
+//   MAGISK_GRADLE_LOCK_MAX_WAIT_SEC 排队上限秒数（默认 3000；超限直接让构建失败并打出持有者）
+//   MAGISK_BUILD_GUARD_SEED        =0 -> 关闭"补种到发行版"
+//   MAGISK_GRADLE_SOURCE           指定补种用的权威脚本路径（默认自动探测）
+//   MAGISK_GW_LOCK_HELD            =1 -> 上游已持有全局锁，此处跳过。写它的人有两个：gw，
+//                                      以及修复三之后持锁构建自己（经 Test 任务的 env 注入）。
+
+import java.lang.management.ManagementFactory
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import org.gradle.api.tasks.testing.Test
+
+def guardLog = { String m -> println "[build-guard] " + m }
+
+// ---------- 补种到发行版 init.d（必须在碰任何锁 fd 之前做完） ----------
+try {
+    if (System.getenv("MAGISK_BUILD_GUARD_SEED") != "0" &&
+            System.getProperty("magisk.buildguard.seeded") == null) {
+        System.setProperty("magisk.buildguard.seeded", "1")
+        def loc = gradle.class.protectionDomain?.codeSource?.location   // java.net.URL
+        if (loc != null && "file" == loc.protocol) {
+            Path libDir = Paths.get(loc.toURI()).parent            // <dist>/lib
+            Path distInitd = libDir?.parent?.resolve("init.d")     // -> <dist>/init.d
+            List<Path> srcs = []
+            String srcEnv = System.getenv("MAGISK_GRADLE_SOURCE")
+            if (srcEnv != null && !srcEnv.trim().isEmpty()) srcs << Paths.get(srcEnv.trim())
+            String lockDirEnv = System.getenv("MAGISK_GRADLE_LOCK_DIR")
+            if (lockDirEnv != null && !lockDirEnv.trim().isEmpty())
+                srcs << Paths.get(lockDirEnv.trim()).resolve("00-build-guard.gradle")
+            srcs << Paths.get(System.getProperty("user.home"), ".gradle", "init.d", "00-build-guard.gradle")
+            srcs << Paths.get("/root/.gradle/init.d/00-build-guard.gradle")
+            srcs << Paths.get("/home/brew/.gitlab-runner-magisk/gradle-cache/.locks/00-build-guard.gradle")
+            Path src = srcs.find { Files.isRegularFile(it) && Files.isReadable(it) }
+            Path dst = distInitd?.resolve("00-build-guard.gradle")
+            if (src != null && dst != null && !src.equals(dst)) {
+                // 用"复制"而不是软链：链接目标一旦被删，Gradle 求值 init 脚本会直接报错，
+                // 兜底逻辑绝不能变成构建失败的原因。
+                boolean stale = Files.isSymbolicLink(dst) || !Files.isRegularFile(dst)
+                if (!stale) {
+                    stale = !java.util.Arrays.equals(Files.readAllBytes(dst), Files.readAllBytes(src))
+                }
+                if (stale) {
+                    Files.createDirectories(distInitd)
+                    Path tmp = dst.resolveSibling("00-build-guard.gradle.tmp-" + System.nanoTime())
+                    Files.copy(src, tmp, StandardCopyOption.REPLACE_EXISTING)
+                    Files.move(tmp, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                    guardLog "已把构建锁脚本补种到发行版: ${dst}"
+                }
+            }
+        }
+    }
+} catch (Throwable seedError) {
+    guardLog "补种到发行版失败（不影响构建，可用 gradle-lock-sync 手动撒）: ${seedError}"
+}
+
+// ---------- 加锁 ----------
+try {
+    if (System.getenv("MAGISK_GW_LOCK_HELD") == "1") {
+        guardLog "上游（gw 或持锁的父构建）已持有全局锁，本次不重复加锁。"
+        return
+    }
+
+    String strictEnv = System.getenv("MAGISK_GRADLE_LOCK_STRICT")
+    boolean strict = !(strictEnv == "0")
+
+    // 排队上限。默认 3000s：实测这一条流水线上最长的持锁构建是 1248s（android:build），
+    // 一次加锁只覆盖一个 gradle 调用，所以 3000s 是 2.4 倍余量；gw 的主锁本来就默认
+    // 等 900s 拿不到即失败，这个兜底上限比它宽松，不会比现状更容易误伤正常排队。
+    // 同时它必须明显小于 CI 的 job 超时（7200s），好让自锁死红成一条可读报错，
+    // 而不是把预算耗光、只留一句 "job exceeded timeout"。
+    long maxWaitSec = 3000L
+    String maxWaitEnv = System.getenv("MAGISK_GRADLE_LOCK_MAX_WAIT_SEC")
+    if (maxWaitEnv != null && (maxWaitEnv.trim() =~ /^\d+$/).matches()) {
+        maxWaitSec = Long.parseLong(maxWaitEnv.trim())
+    }
+
+    String envDir = System.getenv("MAGISK_GRADLE_LOCK_DIR")
+    Path dir = null
+    List<Path> candidates = []
+    if (envDir != null && !envDir.trim().isEmpty()) candidates << Paths.get(envDir.trim())
+    candidates << Paths.get("/home/brew/.gitlab-runner-magisk/gradle-cache/.locks")
+    for (Path c : candidates) {
+        if (Files.isDirectory(c) && Files.isWritable(c)) { dir = c; break }
+    }
+    if (dir == null) {
+        // 锁目录不可用：不能让锁本身成为构建失败的原因，降级为提醒。
+        guardLog "警告：找不到可写的锁目录（尝试过 ${candidates.collect { it.toString() }}），本次不加锁。"
+        return
+    }
+
+    Path lockPath = dir.resolve("global-build.lock")
+    Path holderPath = dir.resolve("global-build.lock.holder")
+
+    // 同一个 JVM 的重入标记（home 与发行版两份脚本、build-logic 复合构建都会让 init
+    // 脚本被求值多遍）。只用 String->String，绝不往 System.getProperties() 里塞对象。
+    String holdKey = "magisk.buildguard.held." + lockPath
+
+    String pid = ManagementFactory.getRuntimeMXBean().name.split("@")[0]
+    String host = InetAddress.getLocalHost().getHostName()
+    String tasks = gradle.startParameter.taskNames.join(" ")
+    // 唯一令牌：release 时只清理自己写下的记录，避免误删真正持有者的。
+    String token = "${pid}-${System.nanoTime()}"
+    String startedAt = new Date().toString()
+    // 注意：daemon 的工作目录是 Gradle 发行版目录，此时取 cwd 会得到
+    // "9.9.0-milestone-2" 这种无用值，真实项目名在 settingsEvaluated 时补写。
+    String cwd = "unknown"
+
+    // ---- 跨 JVM 的"上游已持锁"豁免（修复三 A）----
+    // holdKey 只有本 JVM 看得见；Test 任务 fork 出去的 worker、以及 worker 再拉起的 TestKit
+    // 单程 daemon 都是**别的 JVM**，它们会排队来抢本 JVM 正握着的这把锁，而本 JVM 要等测试
+    // 跑完才放锁 —— 互等，strict 模式下就是无限排队（CI 实测挂满 7200s 且零输出）。
+    // Java 改不了自己的 env，但能改本构建 fork 出去的子进程的 env；env 实测能穿过
+    // job -> client -> daemon -> test worker -> 嵌套 daemon 的全部跳数（下面的锁目录
+    // MAGISK_GRADLE_LOCK_DIR 就是这么传到嵌套 daemon 的，否则嵌套构建连排队都排不上）。
+    // 只在"本 JVM 确实握着这把锁"的两条路上登记：真加锁成功、或同 JVM 重入。
+    // strict=0 的碰撞分支和锁目录不可用分支都不登记 —— 那时我们并没有把嵌套构建挡在锁外。
+    def markNestedBuildsExempt = { String why ->
+        try {
+            gradle.beforeProject { p ->
+                p.tasks.withType(Test).configureEach { t ->
+                    t.environment("MAGISK_GW_LOCK_HELD", "1")
+                }
+            }
+            guardLog "已登记嵌套构建豁免：本构建 fork 出去的 Test 任务不再抢这把锁（${why}）"
+        } catch (Throwable markErr) {
+            guardLog "登记嵌套豁免失败（构建照跑，但 TestKit 型子构建可能自锁死）: ${markErr}"
+        }
+    }
+
+    // holder 里记的 pid 是不是本 JVM 的祖先？只在同一 PID namespace 内有意义（容器内成立，
+    // 跨机不成立 —— 参见下面排队提示里"8 小时死 holder 误导排查"那条教训）。判不出来就退回
+    // 纯等上限，绝不反过来把活着的正常持有者说成死锁。
+    def holderIsOwnAncestor = { String holderText ->
+        def pm = (holderText =~ /(?:^|\s)pid=(\d+)/)
+        def hm = (holderText =~ /(?:^|\s)host=(\S+)/)
+        if (!pm.find() || !hm.find() || hm.group(1) != host) return false
+        String hPid = pm.group(1)
+        String cur = pid
+        for (int i = 0; i < 32 && cur != null && cur != "0"; i++) {
+            String txt
+            try { txt = new File("/proc/" + cur + "/stat").text } catch (Exception ignored) { return false }
+            int close = txt.lastIndexOf(')')   // comm 里可能带空格甚至 ')'，只能从最后一个 ')' 之后切
+            if (close < 0) return false
+            String[] f = txt.substring(close + 1).trim().split("\\s+")
+            if (f.length < 2) return false
+            cur = f[1]                         // f[0]=state, f[1]=ppid
+            if (cur == hPid) return true
+        }
+        return false
+    }
+
+    String alreadyHeld = System.getProperty(holdKey)
+    if (alreadyHeld != null) {
+        // 关键：这里连 FileChannel.open() 都不能做。多开一个 fd 再关掉，
+        // 就会把本进程已经持有的 POSIX 锁一起丢掉。
+        guardLog "本 JVM 已持锁（token=${alreadyHeld}），init 脚本重入，复用现有锁。"
+        markNestedBuildsExempt("同 JVM 重入 token=${alreadyHeld}")
+        return
+    }
+
+    FileChannel channel = FileChannel.open(lockPath,
+            StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)
+    FileLock lock = null
+
+    // 自锁死/等太久的报错统一从这里出：先关掉自己那个"有 fd、无锁"的 channel（本 JVM 在
+    // 这条路上从没拿到过锁，所以关 fd 不会重演 2026-10-21 那次"误放别人的锁"），再抛一个
+    // 带标记的异常，让外层 catch 认出它是"必须红"的情况。
+    def deadlock = { String why, FileChannel ch ->
+        try { ch.close() } catch (Exception ignored) {}
+        return new RuntimeException("MAGISK_BUILD_GUARD_DEADLOCK: " + why)
+    }
+
+    if (!strict) {
+        lock = channel.tryLock()
+        if (lock == null) {
+            guardLog "MAGISK_GRADLE_LOCK_STRICT=0 -> 不拦截，但当前已有构建在跑："
+            try { guardLog "  持有者: " + holderPath.toFile().text.trim() } catch (Exception ignored) {}
+            channel.close()
+            return
+        }
+    } else {
+        long t0 = System.currentTimeMillis()
+        long lastNote = -30L
+        long ancestorProbeAtSec = 60L
+        String lastHolder = ""
+        while (lock == null) {
+            lock = channel.tryLock()
+            if (lock != null) break
+            long waitedSec = (System.currentTimeMillis() - t0) / 1000L
+            if (waitedSec - lastNote >= 30L) {
+                lastNote = waitedSec
+                try { lastHolder = holderPath.toFile().text.trim() } catch (Exception ignored) {}
+                guardLog "排队中 ${waitedSec}s —— 全局串行策略：同一时刻只允许一个 Gradle 构建。"
+                if (!lastHolder.isEmpty()) {
+                    guardLog "  当前持有者: ${lastHolder}"
+                    // holder 只是给人看的旁证，真正的互斥是内核记录锁。pid 判断仅限本机：
+                    // CI 容器里的 pid 和宿主机 pid 不是同一命名空间，跨机更不能判，否则会把
+                    // 活着的持有者说成死的（实测一个死了 8 小时的 CI holder 误导过排查）。
+                    def hm = (lastHolder =~ /(?:^|\s)host=(\S+)/)
+                    def pm = (lastHolder =~ /(?:^|\s)pid=(\S+)/)
+                    String hHost = hm.find() ? hm.group(1) : null
+                    String hPid  = pm.find() ? pm.group(1) : null
+                    if (hHost != null && hHost == host && hPid != null)
+                        guardLog "  本机 /proc/${hPid} " + (new File("/proc/" + hPid).exists() ? "存在。" : "已不存在 —— 残留记录，内核锁其实已放，等锁即可。")
+                }
+                guardLog "  （本地/IDE/CI/换 GRADLE_USER_HOME 通用。若持有者是残留 daemon，用 gradle-lock-status 查看、gradle-lock-reset 清理）"
+            }
+            // 修复三 B-1：等过 60s 判一次"我是不是在等自己"。正常构建之间不会出现这种持有者，
+            // 命中就是修复三 A 没盖住的嵌套形态（例如任务直接 exec 一个 gradlew），当场红，
+            // 不用把上限耗满。只判一次，之后交给上限。
+            if (waitedSec >= ancestorProbeAtSec) {
+                ancestorProbeAtSec = Long.MAX_VALUE
+                if (lastHolder.isEmpty()) {
+                    try { lastHolder = holderPath.toFile().text.trim() } catch (Exception ignored) {}
+                }
+                if (holderIsOwnAncestor(lastHolder)) {
+                    throw deadlock("排队 ${waitedSec}s 后判定为嵌套构建自锁死：持有者是本 JVM 的祖先。" +
+                            "持有者: ${lastHolder}；本进程 pid=${pid} tasks=[${tasks}]。" +
+                            "要么上游没把 MAGISK_GW_LOCK_HELD 传下来，要么这条嵌套路径绕过了 Test 任务。", channel)
+                }
+            }
+            // 修复三 B-2：上限。没有上限时，一次自锁死的唯一表现是"两小时零输出"。
+            if (waitedSec >= maxWaitSec) {
+                throw deadlock("排队超过上限 ${maxWaitSec}s（MAGISK_GRADLE_LOCK_MAX_WAIT_SEC 可调）。" +
+                        "持有者: ${lastHolder}；本进程 pid=${pid} tasks=[${tasks}]。", channel)
+            }
+            Thread.sleep(1000L)
+        }
+    }
+
+    def writeHolder = { String proj ->
+        try {
+            holderPath.toFile().text =
+                "pid=${pid} host=${host} project=${proj} tasks=[${tasks}] started=${startedAt} token=${token}\n"
+        } catch (Exception ignored) {}
+    }
+    writeHolder(cwd)
+    System.setProperty(holdKey, token)
+    markNestedBuildsExempt("pid=${pid} tasks=[${tasks}]")
+
+    // settingsEvaluated 才能拿到真实项目目录，补写一次，让排队者看清是谁在跑。
+    gradle.settingsEvaluated { settings ->
+        try {
+            String real = settings.rootDir.canonicalFile.name
+            writeHolder(real)
+            guardLog "持锁构建: ${real} tasks=[${tasks}]"
+        } catch (Exception ignored) {}
+    }
+
+    def released = new java.util.concurrent.atomic.AtomicBoolean(false)
+    def release = {
+        if (!released.compareAndSet(false, true)) return
+        try {
+            // 只清自己那次求值写下的标记，重入求值不会误清。
+            if (System.getProperty(holdKey) == token) System.clearProperty(holdKey)
+        } catch (Exception ignored) {}
+        try {
+            if (lock != null && lock.valid) lock.release()
+        } catch (Exception ignored) {}
+        // 只有成功加锁的这一路才关 channel；失败那一路的 fd 绝不在此处产生。
+        try { channel.close() } catch (Exception ignored) {}
+        try {
+            String cur = holderPath.toFile().text
+            if (cur == null || cur.contains(token)) Files.deleteIfExists(holderPath)
+        } catch (Exception ignored) {}
+    }
+    // daemon 模式下 JVM 不退出，只有 buildFinished 能在构建一结束就放锁；shutdown hook
+    // 只是崩溃/被杀时的兜底。buildFinished 已被 Gradle 标记废弃（9.x 每次构建都告警），
+    // 真被删掉时这里必须降级成"提醒 + 靠 shutdown hook"，而不是让所有构建炸掉。
+    try {
+        gradle.buildFinished { release() }
+    } catch (Throwable regErr) {
+        guardLog "⚠ buildFinished 注册失败（${regErr.class.simpleName}）：本次只能等 JVM 退出放锁；daemon 模式下会长时间占着全局锁。"
+    }
+    Runtime.getRuntime().addShutdownHook(new Thread({ release() } as Runnable))
+
+    guardLog "已获得全局构建锁（pid=${pid} project=${cwd} tasks=[${tasks}]）"
+} catch (Throwable t) {
+    // 唯一的例外：自锁死/等满上限必须让构建红。"锁设施不许拖垮构建"这条原则不能把它一起
+    // 吞掉 —— 吞掉之后现场只剩"CI 两小时零输出 + 一句 job timeout"，人只能靠 holder 文件和
+    // jstack 反推（2026-10-23 就是这么排的）。红掉的嵌套构建会变成那条 Test 测试失败，
+    // 消息直接进 trace。
+    if (t instanceof RuntimeException && t.message != null &&
+            t.message.startsWith("MAGISK_BUILD_GUARD_DEADLOCK")) throw t
+    // 其余加锁失败（锁目录权限、JVM API 变动、channel 意外）仍只提醒。
+    println "[build-guard] 加锁失败（不影响构建）: ${t}"
+}
