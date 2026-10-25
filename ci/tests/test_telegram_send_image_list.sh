@@ -126,4 +126,38 @@ rc=0
 captured="$(cat "$capture_file")"
 assert_not_contains "$captured" 'pinChatMessage' "a failed send must not pin"
 
+# --- scratch checkout without MAGISK_CI_TOOLKIT_DIR (.magisk_telegram_images) ------
+# The images template clones the toolkit into a scratch dir and runs the script
+# from <scratch>/ci/. capture_ids.py must then be found next to the script and
+# the delivered ids must land in .telegram_ci_state for the legacy-room relay.
+scratch="$tmp_dir/scratch-toolkit"
+mkdir -p "$scratch/ci"
+cp "$root_dir/ci/telegram_send_image_list.sh" "$scratch/ci/"
+cp "$root_dir/ci/capture_ids.py" "$scratch/ci/"
+state_dir="$tmp_dir/state-project"
+mkdir -p "$state_dir"
+(
+  curl() {
+    printf '%s\n' "$@" >"$CAPTURE_FILE"
+    printf '{"ok":true,"result":{"message_id":4242}}'
+  }
+  export -f curl
+  CAPTURE_FILE="$capture_file" \
+  TG_BOT_TOKEN=test \
+  TG_CHAT_ID=-1003366669771 \
+  MAGISK_TELEGRAM_PIN=off \
+  MAGISK_TELEGRAM_IMAGE_PUBLISH_OK=1 \
+  MAGISK_TELEGRAM_PROJECT_NAME=NapGram \
+  MAGISK_TELEGRAM_PROJECT_TAG='#NapGram' \
+  MAGISK_TELEGRAM_IMAGES='registry.example.invalid/napgram:dev-latest' \
+  CI_PROJECT_DIR="$state_dir" \
+  CI_COMMIT_REF_NAME=beta \
+    env -u MAGISK_CI_TOOLKIT_DIR bash "$scratch/ci/telegram_send_image_list.sh" >/dev/null
+)
+state="$(cat "$state_dir/.telegram_ci_state" 2>/dev/null || true)"
+assert_contains "$state" 'ids=4242' \
+  "scratch ci/ checkout must capture ids for the legacy relay"
+assert_contains "$state" 'chat=-1003366669771' \
+  "scratch ci/ checkout must persist the chat id for the legacy relay"
+
 echo "Telegram image-list notification tests passed"

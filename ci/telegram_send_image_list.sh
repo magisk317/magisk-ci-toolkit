@@ -77,9 +77,15 @@ telegram_capture_message_ids() {
   [ -n "$resp" ] || return 0
   local ids
   ids=""
+  # capture_ids.py lives at <toolkit>/ci/capture_ids.py. MAGISK_CI_TOOLKIT_DIR
+  # is the toolkit root when the consumer template exports it (.magisk_telegram_ci);
+  # .magisk_telegram_images instead runs this script straight from a scratch
+  # checkout where it sits next to capture_ids.py inside ci/, so probe both.
   local _cap_dir="${MAGISK_CI_TOOLKIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}"
-  if [ -n "$python_bin" ] && [ -f "$_cap_dir/ci/capture_ids.py" ]; then
-    ids="$(printf '%s' "$resp" | "$python_bin" "$_cap_dir/ci/capture_ids.py" 2>/dev/null)" || {
+  local _cap_script="$_cap_dir/ci/capture_ids.py"
+  [ -f "$_cap_script" ] || _cap_script="$_cap_dir/capture_ids.py"
+  if [ -n "$python_bin" ] && [ -f "$_cap_script" ]; then
+    ids="$(printf '%s' "$resp" | "$python_bin" "$_cap_script" 2>/dev/null)" || {
       echo "capture_ids failed; Telegram pin will be skipped" >&2
       ids=""
     }

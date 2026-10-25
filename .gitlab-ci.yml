@@ -107,6 +107,8 @@ shell:test:
     - bash ci/tests/test_reconcile_github_refs.sh
     - bash ci/tests/test_renovate_serial_loop.sh
     - bash ci/tests/test_gitlab_telegram_release.sh
+    - bash ci/tests/test_telegram_send_image_list.sh
+    - bash ci/tests/test_telegram_pin.sh
     - bash ci/tests/test_linux_release_template.sh
     - bash gradle/tests/test_run_gradle_with_retry.sh
     - bash gradle/tests/test_build_guard_drift.sh
