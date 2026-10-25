@@ -318,6 +318,11 @@ try {
     // daemon 模式下 JVM 不退出，只有 buildFinished 能在构建一结束就放锁；shutdown hook
     // 只是崩溃/被杀时的兜底。buildFinished 已被 Gradle 标记废弃（9.x 每次构建都告警），
     // 真被删掉时这里必须降级成"提醒 + 靠 shutdown hook"，而不是让所有构建炸掉。
+    boolean ccStore = false
+    try { ccStore = gradle.startParameter.configurationCache } catch (Throwable ignored) {}
+    if (ccStore) {
+        guardLog "configuration-cache 构建：跳过 buildFinished 注册（Gradle 9 把它判为 CC 违规，会让构建直接红），放锁依赖 shutdown hook 与下次构建重入。"
+    } else
     try {
         gradle.buildFinished { release() }
     } catch (Throwable regErr) {
