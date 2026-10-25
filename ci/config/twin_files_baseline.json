@@ -74,8 +74,6 @@
  "SmsInboxObserver.kt",
  "SmsParseAction.kt",
  "SmsProviderHook.kt",
- "SortType.kt",
- "ThemeAccent.kt",
  "ThemeSettingsPage.kt",
  "ToastAction.kt",
  "TransitionConst.kt",
