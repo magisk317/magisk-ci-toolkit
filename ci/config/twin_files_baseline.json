@@ -29,7 +29,6 @@
  "DBProvider.kt",
  "EntityStoreManager.kt",
  "EntityType.kt",
- "FaqScreen.kt",
  "HookPreferenceMirror.kt",
  "InputHelper.kt",
  "LauncherActivity.kt",
