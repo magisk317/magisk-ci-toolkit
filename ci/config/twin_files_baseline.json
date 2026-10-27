@@ -1,7 +1,6 @@
 [
  "Action.kt",
  "AppConfigScreen.kt",
- "AppConfigScreenMaterial.kt",
  "AppConfigScreenMiuix.kt",
  "AppConfigViewModel.kt",
  "AppDatabase.kt",
