@@ -30,6 +30,13 @@
     https_proxy: "$CI_HTTPS_PROXY"
     all_proxy: "$CI_ALL_PROXY"
     no_proxy: "$CI_NO_PROXY"
+    # Renovate resolves github.com-hosted dependencies (gomod modules,
+    # github-actions, JitPack com.github.* artifacts) through the GitHub API.
+    # Without a token those lookups silently degrade and every consumer
+    # dashboard warns. GITHUB_PAT is the group-level protected PAT, which is
+    # present in the scheduled jobs that run Renovate; GITHUB_COM_TOKEN is the
+    # variable name Renovate reads for github.com.
+    GITHUB_COM_TOKEN: "$GITHUB_PAT"
     MAGISK_RENOVATE_PLATFORM_AUTOMERGE: "false"
     MAGISK_RENOVATE_IGNORE_TESTS: "true"
     MAGISK_RENOVATE_MR_POLL_INTERVAL_SECONDS: "5"
