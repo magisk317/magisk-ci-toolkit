@@ -155,4 +155,11 @@
           exit 1
         }
       fi
+      # Same pin guard as the Android base. The toolkit itself includes its
+      # own templates locally and has no project includes to verify.
+      if grep -q "project:[[:space:]]*magisk3171/shared/magisk-ci-toolkit" "$CI_PROJECT_DIR/.gitlab-ci.yml"; then
+        bash "$toolkit_dir/repo/ci/verify_toolkit_pin.sh" --root "$CI_PROJECT_DIR"
+      else
+        echo "No toolkit includes in .gitlab-ci.yml; pin guard not applicable."
+      fi
       bash "$toolkit_dir/repo/ci/renovate_serial_loop.sh"

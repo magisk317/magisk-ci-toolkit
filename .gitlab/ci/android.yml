@@ -328,6 +328,10 @@
         fi
       fi
       # toolkit-checkout-contract:end
+      # Pin guard: the GitLab includes, the resolver fallback and the GitHub
+      # workflow refs must all name this same toolkit commit, or a single
+      # commit ships two different release chains.
+      bash "$MAGISK_CI_TOOLKIT_DIR/ci/verify_toolkit_pin.sh" --root "$CI_PROJECT_DIR"
       bash "$MAGISK_CI_TOOLKIT_DIR/android/validate_host_tools.sh" --sdk-root "$ANDROID_HOME" --build-tools "${MAGISK_ANDROID_BUILD_TOOLS_VERSION:-37.0.0}"
       # Sync shared version catalog from build-logic submodule.
       # The developer's local copy may be stale if the submodule pointer
