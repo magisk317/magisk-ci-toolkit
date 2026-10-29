@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Runs after every commit: prints the submodule-pointer alignment table for this repo.
+# Never blocks - a commit that already happened cannot be un-committed by a hook.
+set -uo pipefail
+GATE="${MAGISK_POINTER_GATE:-}"
+if [ -z "$GATE" ]; then
+  for candidate in \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/.magisk-ci-toolkit/ci/git_hooks/pointer_gate.py" \
+    "/root/play/magisk-ci-toolkit/ci/git_hooks/pointer_gate.py"; do
+    [ -f "$candidate" ] && GATE="$candidate" && break
+  done
+fi
+[ -n "$GATE" ] || exit 0
+python3 "$GATE" --mode post-commit --repo "$(git rev-parse --show-toplevel)" || true
+exit 0

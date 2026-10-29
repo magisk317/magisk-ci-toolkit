@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Runs before every push: re-checks submodule pointers against the real remotes and refuses
+# the push when a parent would advertise a gitlink that no remote can resolve.
+set -uo pipefail
+REMOTE="${1:-origin}"
+REFS="$(cat || true)"
+[ -n "$REFS" ] || exit 0
+GATE="${MAGISK_POINTER_GATE:-}"
+if [ -z "$GATE" ]; then
+  for candidate in \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/.magisk-ci-toolkit/ci/git_hooks/pointer_gate.py" \
+    "/root/play/magisk-ci-toolkit/ci/git_hooks/pointer_gate.py"; do
+    [ -f "$candidate" ] && GATE="$candidate" && break
+  done
+fi
+[ -n "$GATE" ] || { echo "pointer gate not found; refusing to push blind" >&2; exit 1; }
+REPO="$(git rev-parse --show-toplevel)"
+echo "== pre-push $REMOTE $(printf '%s' "$REFS" | tr '\n' ' ')"
+python3 "$GATE" --mode pre-push --repo "$REPO" || exit 1
+exit 0
