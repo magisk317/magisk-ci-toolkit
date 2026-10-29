@@ -108,8 +108,15 @@ def remote_tip(sub: Path, branch: str, live: bool) -> tuple[str, str]:
     return (out if rc == 0 else ""), "cached"
 
 
-def reachable(sub: Path, sha: str) -> bool | None:
-    """True/False once the remote refs are known; None when it cannot be judged."""
+def reachable(sub: Path, sha: str, live: bool) -> bool | None:
+    """True/False once the remote refs are known; None when it cannot be judged.
+
+    The submodule copy must be fetched first. It usually only holds the refs that were current
+    when the pin was last moved, so testing reachability against stale refs reports a published
+    commit as missing - which is exactly what this gate would then refuse a push for.
+    """
+    if live:
+        git(sub, "fetch", "--quiet", "origin")
     out, rc = git(sub, "branch", "-r", "--contains", sha)
     if rc != 0:
         return None
@@ -156,7 +163,7 @@ def evaluate(repo: Path, live: bool) -> tuple[list[str], list[str], list[str]]:
                 relation = "different lineage"
             drift.append("%s: pin %s is not the shared-repo tip %s (%s)"
                          % (name, short(local), short(tip), relation))
-        if sub.is_dir() and reachable(sub, local) is False:
+        if sub.is_dir() and reachable(sub, local, live) is False:
             failures.append(
                 "%s: pin %s is on no remote branch of %s - push the shared repo first, "
                 "otherwise clone/CI cannot resolve it" % (name, short(local), path)
@@ -176,7 +183,7 @@ def evaluate(repo: Path, live: bool) -> tuple[list[str], list[str], list[str]]:
             if tip and pin != tip:
                 drift.append("ci-toolkit: .gitlab-ci.yml pins %s, toolkit tip is %s"
                              % (short(pin), short(tip)))
-            if reachable(probe, pin) is False:
+            if reachable(probe, pin, live) is False:
                 failures.append("ci-toolkit: pinned ref %s is not reachable on the toolkit remote"
                                 % short(pin))
             break
