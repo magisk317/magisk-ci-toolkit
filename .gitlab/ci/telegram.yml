@@ -112,7 +112,7 @@
       if [ -f "${CI_PROJECT_DIR:-}/.telegram_ci_state" ]; then
         if [ -n "${MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT:-}" ] && [ -x "$tmp/toolkit/ci/telegram_legacy_notice.sh" ]; then
           bash "$tmp/toolkit/ci/telegram_legacy_notice.sh" \
-            || echo "telegram legacy notice failed; ignoring" >&2
+            || echo "::warning::telegram legacy notice failed; ignoring" >&2
         elif [ -f "${CI_PROJECT_DIR:-}/scripts/telegram_ci_hook.sh" ]; then
           bash "${CI_PROJECT_DIR}/scripts/telegram_ci_hook.sh" \
             || echo "telegram_ci_hook.sh failed; ignoring" >&2
@@ -247,6 +247,30 @@
         printf '%s/bot%s/%s' "$TG_API_BASE" "$TG_BOT_TOKEN" "$1"
       }
 
+      # Telegram occasionally answers a POST with HTTP 200 and an empty body (seen on
+      # 2026-10-30 through the amd64 runner's gost/SOCKS5 egress). Retry first, then
+      # surface the empty body instead of reading it as a delivered message.
+      tg_curl() {
+        local -a http1=()
+        [ "${MAGISK_TELEGRAM_HTTP1:-0}" = "1" ] && http1=(--http1.1)
+        curl -sS ${http1[@]+"${http1[@]}"} \
+          --retry "${MAGISK_TELEGRAM_RETRY:-3}" \
+          --retry-delay "${MAGISK_TELEGRAM_RETRY_DELAY:-2}" \
+          --retry-all-errors \
+          --max-time "${MAGISK_TELEGRAM_TIMEOUT:-60}" \
+          "$@"
+      }
+
+      tg_expect_response() {
+        local resp=${1:-} what=${2:-telegram request}
+        if [ -z "$resp" ]; then
+          echo "::warning::${what} returned an empty response (proxy/network hiccup)"
+          echo "${what} returned an empty response" >&2
+          return 1
+        fi
+        return 0
+      }
+
       # --- optional rolling pin (MAGISK_TELEGRAM_PIN=latest) ---
       TELEGRAM_LAST_MESSAGE_IDS=""
 
@@ -319,7 +343,7 @@
             pin_args+=(-d "message_thread_id=$thread")
           fi
           local pin_resp
-          pin_resp="$(curl -sS -X POST "$(telegram_api_url pinChatMessage)" "${pin_args[@]}" 2>&1)" || true
+          pin_resp="$(tg_curl -X POST "$(telegram_api_url pinChatMessage)" "${pin_args[@]}" 2>&1)" || true
           if ! printf '%s' "$pin_resp" | grep -q '"ok":true'; then
             echo "Telegram pinChatMessage failed for $mid: $pin_resp" >&2
             any_failed=1
@@ -343,7 +367,7 @@
               unpin_args+=(-d "message_thread_id=$thread")
             fi
             local unpin_resp
-            unpin_resp="$(curl -sS -X POST "$(telegram_api_url unpinChatMessage)" "${unpin_args[@]}" 2>&1)" || true
+            unpin_resp="$(tg_curl -X POST "$(telegram_api_url unpinChatMessage)" "${unpin_args[@]}" 2>&1)" || true
             if ! printf '%s' "$unpin_resp" | grep -q '"ok":true'; then
               echo "Telegram unpinChatMessage failed for $mid: $unpin_resp" >&2
             fi
@@ -371,10 +395,11 @@
           curl_args+=(-d "message_thread_id=$thread")
         fi
         local resp
-        if ! resp="$(curl "${curl_args[@]}")"; then
+        if ! resp="$(tg_curl "${curl_args[@]}")"; then
           printf '%s\n' "$resp" >&2
           exit 1
         fi
+        tg_expect_response "$resp" "Telegram send" || exit 1
         telegram_capture_message_ids "$resp"
       }
 
@@ -410,10 +435,11 @@
           curl_args+=(--form-string "caption=$(telegram_truncate_caption "$caption")" --form-string "parse_mode=HTML")
         fi
         local resp
-        if ! resp="$(curl "${curl_args[@]}")"; then
+        if ! resp="$(tg_curl "${curl_args[@]}")"; then
           printf '%s\n' "$resp" >&2
           exit 1
         fi
+        tg_expect_response "$resp" "Telegram send" || exit 1
         telegram_capture_message_ids "$resp"
       }
 
@@ -516,11 +542,12 @@
           curl_args+=(--form-string "media=${media_json}")
           echo "Sending media group with ${#chunk[@]} documents to Telegram..."
           local resp
-          if ! resp="$(curl "${curl_args[@]}")"; then
+          if ! resp="$(tg_curl "${curl_args[@]}")"; then
             printf '%s\n' "$resp" >&2
             exit 1
           fi
-          telegram_capture_message_ids "$resp"
+          tg_expect_response "$resp" "Telegram send" || exit 1
+        telegram_capture_message_ids "$resp"
           idx=$((idx + ${#chunk[@]}))
           chunk_index=$((chunk_index + 1))
         done
@@ -927,6 +954,30 @@
         printf '%s/bot%s/%s' "$TG_API_BASE" "$TG_BOT_TOKEN" "$1"
       }
 
+      # Telegram occasionally answers a POST with HTTP 200 and an empty body (seen on
+      # 2026-10-30 through the amd64 runner's gost/SOCKS5 egress). Retry first, then
+      # surface the empty body instead of reading it as a delivered message.
+      tg_curl() {
+        local -a http1=()
+        [ "${MAGISK_TELEGRAM_HTTP1:-0}" = "1" ] && http1=(--http1.1)
+        curl -sS ${http1[@]+"${http1[@]}"} \
+          --retry "${MAGISK_TELEGRAM_RETRY:-3}" \
+          --retry-delay "${MAGISK_TELEGRAM_RETRY_DELAY:-2}" \
+          --retry-all-errors \
+          --max-time "${MAGISK_TELEGRAM_TIMEOUT:-60}" \
+          "$@"
+      }
+
+      tg_expect_response() {
+        local resp=${1:-} what=${2:-telegram request}
+        if [ -z "$resp" ]; then
+          echo "::warning::${what} returned an empty response (proxy/network hiccup)"
+          echo "${what} returned an empty response" >&2
+          return 1
+        fi
+        return 0
+      }
+
       # --- optional rolling pin (MAGISK_TELEGRAM_PIN=latest) ---
       TELEGRAM_LAST_MESSAGE_IDS=""
 
@@ -999,7 +1050,7 @@
             pin_args+=(-d "message_thread_id=$thread")
           fi
           local pin_resp
-          pin_resp="$(curl -sS -X POST "$(telegram_api_url pinChatMessage)" "${pin_args[@]}" 2>&1)" || true
+          pin_resp="$(tg_curl -X POST "$(telegram_api_url pinChatMessage)" "${pin_args[@]}" 2>&1)" || true
           if ! printf '%s' "$pin_resp" | grep -q '"ok":true'; then
             echo "Telegram pinChatMessage failed for $mid: $pin_resp" >&2
             any_failed=1
@@ -1023,7 +1074,7 @@
               unpin_args+=(-d "message_thread_id=$thread")
             fi
             local unpin_resp
-            unpin_resp="$(curl -sS -X POST "$(telegram_api_url unpinChatMessage)" "${unpin_args[@]}" 2>&1)" || true
+            unpin_resp="$(tg_curl -X POST "$(telegram_api_url unpinChatMessage)" "${unpin_args[@]}" 2>&1)" || true
             if ! printf '%s' "$unpin_resp" | grep -q '"ok":true'; then
               echo "Telegram unpinChatMessage failed for $mid: $unpin_resp" >&2
             fi
@@ -1051,10 +1102,11 @@
           curl_args+=(-d "message_thread_id=$thread")
         fi
         local resp
-        if ! resp="$(curl "${curl_args[@]}")"; then
+        if ! resp="$(tg_curl "${curl_args[@]}")"; then
           printf '%s\n' "$resp" >&2
           exit 1
         fi
+        tg_expect_response "$resp" "Telegram send" || exit 1
         telegram_capture_message_ids "$resp"
       }
 
@@ -1090,10 +1142,11 @@
           curl_args+=(--form-string "caption=$(telegram_truncate_caption "$caption")" --form-string "parse_mode=HTML")
         fi
         local resp
-        if ! resp="$(curl "${curl_args[@]}")"; then
+        if ! resp="$(tg_curl "${curl_args[@]}")"; then
           printf '%s\n' "$resp" >&2
           exit 1
         fi
+        tg_expect_response "$resp" "Telegram send" || exit 1
         telegram_capture_message_ids "$resp"
       }
 
@@ -1196,11 +1249,12 @@
           curl_args+=(--form-string "media=${media_json}")
           echo "Sending media group with ${#chunk[@]} documents to Telegram..."
           local resp
-          if ! resp="$(curl "${curl_args[@]}")"; then
+          if ! resp="$(tg_curl "${curl_args[@]}")"; then
             printf '%s\n' "$resp" >&2
             exit 1
           fi
-          telegram_capture_message_ids "$resp"
+          tg_expect_response "$resp" "Telegram send" || exit 1
+        telegram_capture_message_ids "$resp"
           idx=$((idx + ${#chunk[@]}))
           chunk_index=$((chunk_index + 1))
         done
@@ -1363,7 +1417,7 @@
       if [ -f "${CI_PROJECT_DIR:-}/.telegram_ci_state" ]; then
         if [ -n "${MAGISK_TELEGRAM_LEGACY_NOTICE_CHAT:-}" ] && [ -x "$tmp/toolkit/ci/telegram_legacy_notice.sh" ]; then
           bash "$tmp/toolkit/ci/telegram_legacy_notice.sh" \
-            || echo "telegram legacy notice failed; ignoring" >&2
+            || echo "::warning::telegram legacy notice failed; ignoring" >&2
         fi
       fi
   script:

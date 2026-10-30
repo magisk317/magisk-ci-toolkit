@@ -41,12 +41,25 @@ if [ -n "${MAGISK_TELEGRAM_LEGACY_NOTICE_THREAD:-}" ]; then
   thread_args=(-d "message_thread_id=${MAGISK_TELEGRAM_LEGACY_NOTICE_THREAD}")
 fi
 
-resp="$(curl -sS -X POST "${TG_API_BASE}/bot${token}/sendMessage" \
+http1_flag=()
+[ "${MAGISK_TELEGRAM_HTTP1:-0}" = "1" ] && http1_flag=(--http1.1)
+resp="$(curl -sS ${http1_flag[@]+"${http1_flag[@]}"} \
+  --retry "${MAGISK_TELEGRAM_RETRY:-3}" \
+  --retry-delay "${MAGISK_TELEGRAM_RETRY_DELAY:-2}" \
+  --retry-all-errors \
+  --max-time "${MAGISK_TELEGRAM_TIMEOUT:-60}" \
+  -X POST "${TG_API_BASE}/bot${token}/sendMessage" \
   -d "chat_id=${notice_chat}" \
   "${thread_args[@]}" \
   --data-urlencode "text=${text}")" || exit 1
 printf '%s\n' "$resp"
+if [ -z "$resp" ]; then
+  echo "::warning::legacy-topic notice got an empty response (proxy/network hiccup) after retries"
+  echo "legacy-topic notice failed: empty response" >&2
+  exit 1
+fi
 printf '%s' "$resp" | grep -q '"ok":true' || {
+  echo "::warning::legacy-topic notice was rejected by Telegram"
   echo "legacy-topic notice failed: $resp" >&2
   exit 1
 }
