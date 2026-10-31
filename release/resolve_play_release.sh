@@ -263,6 +263,32 @@ else
   echo "WARN: Play version query unavailable for $package_name; using fallback versionCode=$version_code" >&2
 fi
 
+# Join the shared version axis. CI and CI-dist builds draw their versionCode
+# from the allocator Worker (ci/allocate_version_code.sh), so a release that
+# only floors on Play's burned scale can land BELOW the beta builds users
+# already run (MiPush v1.1.2 resolved to 1625 under a 1682 beta on 2026-10-31).
+# Allocate one idempotent code for this pipeline and keep the higher of the
+# two: the allocator covers the CI axis, play_max+1 covers Play's burned
+# scale (withdrawn and archived bundles included). No token wired -> old
+# behaviour with a warning; a wired-but-failing allocator fails closed.
+if [[ -n "${MAGISK_VERSION_ALLOCATOR_TOKEN:-}" && -n "${CI_PROJECT_NAME:-}" ]]; then
+  axis_scope="${MAGISK_VERSION_SCOPE:-gitlab:${CI_PROJECT_ID:-0}:${CI_PIPELINE_IID:-0}}"
+  axis_client="$(cd "$(dirname "${BASH_SOURCE[0]}")/../ci" && pwd)/allocate_version_code.sh"
+  if allocated_code="$(bash "$axis_client" --project "$CI_PROJECT_NAME" --scope "$axis_scope")"; then
+    if (( allocated_code > version_code )); then
+      echo "version axis: release code raised $version_code -> $allocated_code (allocator scope=$axis_scope)" >&2
+      version_code="$allocated_code"
+    else
+      echo "version axis: play scale $version_code already above allocated $allocated_code" >&2
+    fi
+  else
+    echo "ERROR: version allocator unreachable for $CI_PROJECT_NAME; failing closed instead of shipping a downgrade" >&2
+    exit 1
+  fi
+elif [[ -z "${MAGISK_VERSION_ALLOCATOR_TOKEN:-}" ]]; then
+  echo "WARN: MAGISK_VERSION_ALLOCATOR_TOKEN not set; release code stays on the Play scale only" >&2
+fi
+
 # Review gate, effective on every Play track (beta, production, alpha, ...).
 # If the latest release on the target track has not gone live yet — it is
 # still in review (IN_REVIEW) or approved but waiting for a managed publish
