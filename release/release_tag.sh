@@ -166,6 +166,22 @@ for entry in rule.get("create_access_levels") or []:
   return "$status"
 }
 
+# Delete a GitLab release bound to the tag if one exists, so a same-tag
+# republish starts from a clean release object instead of colliding with the
+# stale one (mirrors delete_local_tag_if_exists / delete_remote_tag_if_exists).
+delete_gitlab_release_if_exists() {
+  local root_dir="$1"
+  local tag_name="$2"
+
+  if (cd "$root_dir" && glab api "projects/:fullpath/releases/$tag_name" >/dev/null 2>&1); then
+    echo "WARN: GitLab release exists, deleting before republish: $tag_name"
+    if ! (cd "$root_dir" && glab api --method DELETE "projects/:fullpath/releases/$tag_name" >/dev/null 2>&1); then
+      echo "ERROR: failed to delete GitLab release $tag_name" >&2
+      exit 1
+    fi
+  fi
+}
+
 # Delete remote tag if it exists
 delete_remote_tag_if_exists() {
   local root_dir="$1"
@@ -407,6 +423,7 @@ release_tag() {
   fi
 
   # Delete existing tags and create new one
+  delete_gitlab_release_if_exists "$root_dir" "$tag_name"
   delete_local_tag_if_exists "$root_dir" "$tag_name"
   delete_remote_tag_if_exists "$root_dir" "$tag_name" "$remote_name"
   create_signed_tag "$root_dir" "$tag_name" "$remote_name" "$current_branch"

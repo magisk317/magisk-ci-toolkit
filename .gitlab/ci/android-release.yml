@@ -526,21 +526,19 @@
         rm -f "$modules_push_err"
       fi
 
+      # Same-tag republish is delete + recreate, never update-in-place: a
+      # stale release keeps old assets and old publish metadata that a
+      # --clobber/edit pass would silently carry over.
       if gh release view "$modules_release_tag" --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" >/dev/null 2>&1; then
-        gh release upload "$modules_release_tag" "${apk_files[@]}" \
+        echo "WARN: modules-repo release exists, deleting before republish: $modules_release_tag"
+        gh release delete "$modules_release_tag" \
           --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
-          --clobber
-        gh release edit "$modules_release_tag" \
-          --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
-          --title "v${modules_version_name}" \
-          --draft=false \
-          --notes-file release-notes.md
-      else
-        gh release create "$modules_release_tag" "${apk_files[@]}" \
-          --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
-          --title "v${modules_version_name}" \
-          --notes-file release-notes.md
+          --yes --cleanup-tag=false
       fi
+      gh release create "$modules_release_tag" "${apk_files[@]}" \
+        --repo "$MAGISK_ANDROID_RELEASE_MODULES_REPO" \
+        --title "v${modules_version_name}" \
+        --notes-file release-notes.md
 
 # Publish the GitHub Release for a tag, driven from the GitLab pipeline.
 #
@@ -617,21 +615,18 @@
           --generate-github-notes \
           --output "$notes_file"
 
+      # Same-tag republish is delete + recreate, never update-in-place (see
+      # the modules-repo block above).
       if gh release view "$CI_COMMIT_TAG" --repo "$github_repo" >/dev/null 2>&1; then
-        gh release upload "$CI_COMMIT_TAG" "${apk_files[@]}" \
+        echo "WARN: GitHub release exists, deleting before republish: $CI_COMMIT_TAG"
+        gh release delete "$CI_COMMIT_TAG" \
           --repo "$github_repo" \
-          --clobber
-        gh release edit "$CI_COMMIT_TAG" \
-          --repo "$github_repo" \
-          --title "$CI_COMMIT_TAG" \
-          --draft=false \
-          --notes-file "$notes_file"
-      else
-        gh release create "$CI_COMMIT_TAG" "${apk_files[@]}" \
-          --repo "$github_repo" \
-          --title "$CI_COMMIT_TAG" \
-          --notes-file "$notes_file"
+          --yes --cleanup-tag=false
       fi
+      gh release create "$CI_COMMIT_TAG" "${apk_files[@]}" \
+        --repo "$github_repo" \
+        --title "$CI_COMMIT_TAG" \
+        --notes-file "$notes_file"
 
       echo "GitHub release ready: https://github.com/${github_repo}/releases/tag/${CI_COMMIT_TAG}"
 
