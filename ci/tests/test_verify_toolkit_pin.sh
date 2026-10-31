@@ -156,4 +156,36 @@ grep -q "ref: $sha_other" "$include_drift/.gitlab-ci.yml" \
   || fail "the include-drift fixture did not change"
 expect_fail "$include_drift" "an include ref at another SHA" "include ref differs"
 
-printf 'ok: verify_toolkit_pin covers the GitLab includes and every GitHub toolkit ref\n'
+# A project or group settings variable is expanded in front of the YAML
+# `variables:` keyword, so the ref a job actually runs with can differ from the
+# ref this repository declares while every static surface still agrees. The
+# guard reads the YAML, so without this comparison it prints the declared pin
+# and passes on top of an older toolkit checkout — the failure that had three
+# repositories resolve their release versionCode with a stale resolver for a
+# day while the pin check reported success in every job log.
+override="$tmp_dir/runtime-override"
+build_consumer "$override"
+status=0
+output="$(MAGISK_CI_TOOLKIT_REF="$sha_other" bash "$guard" --root "$override" 2>&1)" || status=$?
+(( status != 0 )) || fail "a settings-level override of the declared pin was accepted"
+printf '%s\n' "$output" | grep -qF 'overrides the ref declared' || {
+  printf 'FAIL: override rejected for the wrong reason:\n%s\n' "$output" >&2
+  exit 1
+}
+
+agree="$tmp_dir/runtime-agrees"
+build_consumer "$agree"
+if ! output="$(MAGISK_CI_TOOLKIT_REF="$sha_pinned" bash "$guard" --root "$agree" 2>&1)"; then
+  printf 'FAIL: a runtime ref equal to the declared pin should pass, got:\n%s\n' "$output" >&2
+  exit 1
+fi
+
+upper="$tmp_dir/runtime-uppercase"
+build_consumer "$upper"
+upper_ref="$(printf '%s' "$sha_pinned" | tr '[:lower:]' '[:upper:]')"
+if ! output="$(MAGISK_CI_TOOLKIT_REF="$upper_ref" bash "$guard" --root "$upper" 2>&1)"; then
+  printf 'FAIL: an uppercase runtime ref naming the same commit should pass, got:\n%s\n' "$output" >&2
+  exit 1
+fi
+
+printf 'ok: verify_toolkit_pin covers the GitLab includes, every GitHub toolkit ref and settings-level overrides\n'

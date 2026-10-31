@@ -27,6 +27,19 @@ ref="$(sed -nE 's/^[[:space:]]*MAGISK_CI_TOOLKIT_REF:[[:space:]]*"?([^"[:space:]
 [[ "$ref" =~ $sha_regex ]] || { echo "toolkit ref must be one full SHA, got: $ref" >&2; exit 1; }
 expected_ref="$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
 
+# A settings-level CI/CD variable (project or group) is expanded in front of the
+# .gitlab-ci.yml `variables:` keyword, so the value this job actually runs with
+# can differ from the pin the repository declares — silently, with the includes
+# still coming from the declared ref. Without this comparison the script prints
+# the declared pin and passes while the checkout behind it is an older toolkit.
+if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
+  runtime_ref="$(printf '%s' "$MAGISK_CI_TOOLKIT_REF" | tr '[:upper:]' '[:lower:]')"
+  if [ "$runtime_ref" != "$expected_ref" ]; then
+    echo "runtime MAGISK_CI_TOOLKIT_REF ($MAGISK_CI_TOOLKIT_REF) overrides the ref declared in $ci_file ($expected_ref): a project/group settings variable is taking precedence over the YAML" >&2
+    exit 1
+  fi
+fi
+
 mapfile -t refs < <(awk '
   /project:[[:space:]]*magisk3171\/shared\/magisk-ci-toolkit/ { seen=1; next }
   seen && /ref:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/["[:space:]]/, ""); print; seen=0 }
