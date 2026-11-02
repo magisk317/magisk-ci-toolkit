@@ -68,6 +68,9 @@
 #   MAGISK_ANDROID_RELEASE_APK_TASKS / _AAB_TASKS   required  gradle task list,
 #                                                             e.g. ":app:assembleRelease"
 #   MAGISK_ANDROID_RELEASE_GRADLE_EXTRA_ARGS        optional  extra -P/system props
+#   MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES          optional  validator output
+#                                                             types, default "release"
+#   MAGISK_ANDROID_RELEASE_MAX_APK_BYTES            optional  per-file size cap, 0 disables
 #   MAGISK_ANDROID_RELEASE_APK_ROOTS                optional  default "app/build/outputs/apk"
 #   MAGISK_ANDROID_RELEASE_KEYSTORE_PATH            optional  default "$CI_PROJECT_DIR/release.jks"
 #   MAGISK_ANDROID_RELEASE_INJECT_VERSION           optional  default "true"
@@ -130,6 +133,7 @@
     expire_in: 30 days
     paths:
       - "*/build/outputs/apk/**/release/*.apk"
+      - "*/build/outputs/apk/**/debug/*.apk"
       - "*/build/outputs/mapping/**/mapping.txt"
       - "*/build/outputs/native-debug-symbols/**/*.zip"
       - "*/build/test-results/**"
@@ -553,7 +557,7 @@
 # Optional:
 #   MAGISK_ANDROID_RELEASE_GITHUB_REPOSITORY   "<owner>/<repo>", default "<GITHUB_OWNER>/<CI_PROJECT_NAME>"
 #   MAGISK_GITHUB_RELEASE_OWNER                owner used when the repository is not set, default "magisk317"
-#   MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN  default "*arm64-v8a*.apk"
+#   MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN  default "*_release.apk"
 #   MAGISK_ANDROID_RELEASE_GITHUB_RELEASE_NOTES  "false" to skip notes generation
 .magisk_android_release_github:
   extends:
@@ -562,7 +566,7 @@
   stage: release
   interruptible: false
   variables:
-    MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN: "*arm64-v8a*.apk"
+    MAGISK_ANDROID_RELEASE_GITHUB_ASSET_PATTERN: "*_release.apk"
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab" && $GITHUB_RELEASE_TOKEN != ""'
     - when: never

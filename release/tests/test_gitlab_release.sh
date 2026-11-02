@@ -26,4 +26,27 @@ output="$({
 grep -Fq 'https://gitlab.example/api/v4/projects/group%2Fproject/packages/generic/android-release/v1.2.3/example.apk' <<< "$output"
 grep -Fq '"direct_asset_path": "/mipush/example.apk"' <<< "$output"
 
+mkdir -p \
+  "$TMP_DIR/default/app/build/outputs/apk/github/release" \
+  "$TMP_DIR/default/app/build/outputs/apk/github/debug"
+printf 'release' > "$TMP_DIR/default/app/build/outputs/apk/github/release/app-release.apk"
+printf 'debug' > "$TMP_DIR/default/app/build/outputs/apk/github/debug/app-debug.apk"
+printf 'notes' > "$TMP_DIR/default/release-notes.md"
+default_output="$({
+  cd "$TMP_DIR/default"
+  CI_API_V4_URL="https://gitlab.example/api/v4" \
+  CI_PROJECT_ID="group/project" \
+  CI_PROJECT_URL="https://gitlab.example/group/project" \
+  CI_COMMIT_TAG="v1.2.3" \
+  CI_JOB_TOKEN="test-token" \
+  MAGISK_RELEASE_DRY_RUN="true" \
+  MAGISK_RELEASE_NOTES_FILE="$TMP_DIR/default/release-notes.md" \
+    bash "$ROOT_DIR/release/gitlab_release.sh"
+})"
+grep -Fq 'app-release.apk' <<< "$default_output"
+if grep -Fq 'app-debug.apk' <<< "$default_output"; then
+  echo "debug APK leaked into the GitLab release assets" >&2
+  exit 1
+fi
+
 echo "gitlab release prepared-assets test passed"

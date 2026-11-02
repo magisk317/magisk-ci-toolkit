@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/../ci/gitlab_api.sh"
 
 urlencode() {
@@ -63,12 +64,12 @@ else
   mkdir -p "$asset_dir"
 
   mapfile -t source_files < <(
-    find app/build/outputs/apk \
-         app/build/outputs/bundle \
-         app/build/outputs/mapping \
-         app/build/outputs/native-debug-symbols \
-         -type f \( -name '*.apk' -o -name '*.aab' -o -name 'mapping.txt' -o -name 'native-debug-symbols.zip' \) \
-         2>/dev/null | sort
+    {
+      find app/build/outputs/apk -type f -path '*/release/*.apk' 2>/dev/null
+      find app/build/outputs/bundle -type f -name '*.aab' 2>/dev/null
+      find app/build/outputs/mapping -type f -name 'mapping.txt' 2>/dev/null
+      find app/build/outputs/native-debug-symbols -type f -name 'native-debug-symbols.zip' 2>/dev/null
+    } | sort
   )
   if [[ ${#source_files[@]} -eq 0 ]]; then
     echo "ERROR: no release files found under app/build/outputs" >&2

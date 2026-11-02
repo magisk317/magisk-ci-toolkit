@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2153
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +40,8 @@ awk '
 bash -n "$release_script"
 
 mkdir -p "$tmp_dir/work/docs" "$tmp_dir/work/artifacts"
-touch "$tmp_dir/work/artifacts/XposedSmsCode_v3.3.1_arm64-v8a_release.apk"
+printf 'release-apk' > "$tmp_dir/work/artifacts/XposedSmsCode_v3.3.1_arm64-v8a_release.apk"
+printf 'debug-apk' > "$tmp_dir/work/artifacts/XposedSmsCode_v3.3.1_arm64-v8a_debug.apk"
 cat > "$tmp_dir/work/docs/CHANGELOG.md" <<'CHANGELOG'
 # Changelog
 
@@ -58,9 +60,33 @@ cat > "$tmp_dir/work/docs/CHANGELOG.md" <<'CHANGELOG'
 CHANGELOG
 
 curl() {
-  # Assigned in the exported function environment below.
+  # CAPTURE_FILE is supplied to this exported function by run_release.
   # shellcheck disable=SC2153
-  printf '%s\n' "$@" > "$CAPTURE_FILE"
+  local endpoint=unknown arg
+  for arg in "$@"; do
+    case "$arg" in
+      */sendMediaGroup) endpoint=sendMediaGroup ;;
+      */sendDocument) endpoint=sendDocument ;;
+      */sendMessage) endpoint=sendMessage ;;
+      */pinChatMessage) endpoint=pinChatMessage ;;
+      */unpinChatMessage) endpoint=unpinChatMessage ;;
+    esac
+  done
+  {
+    printf -- '--- CALL %s ---\n' "$endpoint"
+    printf '%s\n' "$@"
+  } >> "$CAPTURE_FILE"
+  case "$endpoint" in
+    sendMediaGroup)
+      printf '%s\n' '{"ok":true,"result":[{"message_id":321},{"message_id":322}]}'
+      ;;
+    sendMessage|sendDocument)
+      printf '%s\n' '{"ok":true,"result":{"message_id":400}}'
+      ;;
+    *)
+      printf '%s\n' '{"ok":true,"result":true}'
+      ;;
+  esac
 }
 export -f curl
 
@@ -69,9 +95,16 @@ export -f curl
 run_release() {
   (
     cd "$tmp_dir/work"
-    CAPTURE_FILE="$capture_file" \
+    : > "$capture_file"
+    if CAPTURE_FILE="$capture_file" \
     TG_BOT_TOKEN=test \
-    TG_CHAT_ID=test \
+    TG_CHAT_ID=-1001234567890 \
+    TG_RELEASE_CHAT_ID=-1009876543210 \
+    TG_CI_THREAD_ID=77 \
+    TG_THREAD_ID=88 \
+    MAGISK_CI_TOOLKIT_DIR="$root_dir" \
+    MAGISK_TELEGRAM_PIN=false \
+    MAGISK_TELEGRAM_RELEASE_EXPECTED_ARTIFACT_COUNT=2 \
     MAGISK_TELEGRAM_PROJECT_NAME='Demo > Suite' \
     MAGISK_TELEGRAM_PROJECT_TAG='#Demo' \
     MAGISK_ANDROID_RELEASE_PACKAGE_NAME=com.example.demo \
@@ -82,12 +115,30 @@ run_release() {
     CI_COMMIT_TITLE='chore(deps): bump fastify' \
     CI_PIPELINE_ID=2706357831 \
     CI_PIPELINE_URL=https://gitlab.com/example/demo/-/pipelines/2706357831 \
-      env "$@" bash "$release_script" >/dev/null
-    cat "$capture_file"
+      env "$@" bash "$release_script" >/dev/null; then
+      cat "$capture_file"
+    else
+      rc=$?
+      return "$rc"
+    fi
   )
 }
 
 captured="$(run_release)"
+media_call="$(awk '/--- CALL sendMediaGroup ---/{capture=1; next} /--- CALL/{if (capture) exit} capture' <<< "$captured")"
+message_call="$(awk '/--- CALL sendMessage ---/{capture=1; next} /--- CALL/{if (capture) exit} capture' <<< "$captured")"
+media_line="$(grep -n -- '--- CALL sendMediaGroup ---' <<< "$captured" | cut -d: -f1)"
+message_line="$(grep -n -- '--- CALL sendMessage ---' <<< "$captured" | cut -d: -f1)"
+[[ "$media_line" -lt "$message_line" ]] || fail "attachments must be delivered before the release notice"
+assert_contains "$media_call" 'chat_id=-1001234567890' "attachments must use the CI room"
+assert_contains "$media_call" 'message_thread_id=77' "attachments must use the CI topic"
+assert_not_contains "$media_call" 'Refined Hook' "attachment captions must not repeat the changelog"
+assert_contains "$message_call" 'chat_id=-1009876543210' "release notice must keep its release room"
+assert_contains "$message_call" 'message_thread_id=88' "release notice must keep its release topic"
+assert_contains "$message_call" '<a href="https://t.me/c/1234567890/321">Telegram 附件</a>' \
+  "release notice must link the first attachment message"
+assert_not_contains "$captured" '--retry-all-errors' \
+  "Telegram POSTs must not retry ambiguous transport failures"
 assert_contains "$captured" 'Demo &gt; Suite' "greater-than signs must use valid HTML entities"
 assert_not_contains "$captured" '>gt;' "Bash replacement must not corrupt HTML entities"
 assert_contains "$captured" '📦 Demo &gt; Suite：v3.3.1' \
@@ -126,6 +177,19 @@ assert_not_contains "$captured_no_github" 'github.com/' \
   "MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK=false must hide the GitHub link"
 assert_contains "$captured_no_github" 'GitLab</a>' \
   "the GitLab link must survive hiding the GitHub link"
+
+if run_release MAGISK_TELEGRAM_RELEASE_EXPECTED_ARTIFACT_COUNT=3 >/dev/null 2>&1; then
+  fail "an unexpected release artifact count must fail before sending"
+fi
+for index in 1 2 3 4 5; do
+  printf 'extra-apk' > "$tmp_dir/work/artifacts/extra-${index}_arm64-v8a_debug.apk"
+done
+captured_seven="$(run_release MAGISK_TELEGRAM_RELEASE_EXPECTED_ARTIFACT_COUNT=7)"
+[[ "$(grep -c -- '--- CALL sendMediaGroup ---' <<< "$captured_seven")" -eq 1 ]] || \
+  fail "seven release documents must fit in one media group"
+assert_not_contains "$captured_seven" '--- CALL sendDocument ---' \
+  "seven artifacts must not fall back to individual document sends"
+rm -f "$tmp_dir/work/artifacts"/extra-*_arm64-v8a_debug.apk
 
 owner_rules="$(awk '
   /^\.magisk_android_release_owner_rules:/ { capture = 1 }

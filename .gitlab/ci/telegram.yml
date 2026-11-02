@@ -48,38 +48,9 @@
     - when: on_success
   before_script:
     - |
-      # The rolling pin reads capture_ids.py from the pinned toolkit checkout.
-      ref="main"
-      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
-        ref="$MAGISK_CI_TOOLKIT_REF"
-      fi
-      toolkit_dir="${MAGISK_CI_TOOLKIT_DIR:-$CI_PROJECT_DIR/.magisk-ci-toolkit}"
-      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
-      case "$toolkit_repository" in
-        https://gitlab.com/*)
-          if [ -n "${CI_JOB_TOKEN:-}" ]; then
-            toolkit_repository="https://gitlab-ci-token:${CI_JOB_TOKEN}@${toolkit_repository#https://}"
-          fi
-          ;;
-      esac
-      rm -rf "$toolkit_dir"
-      if git init --quiet "$toolkit_dir" \
-        && git -C "$toolkit_dir" remote add origin "$toolkit_repository" \
-        && git -C "$toolkit_dir" fetch --quiet --depth 1 origin "$ref" \
-        && git -C "$toolkit_dir" checkout --quiet --detach --force FETCH_HEAD; then
-        non_hex=0
-        case "$ref" in
-          ''|*[!0-9a-fA-F]*) non_hex=1 ;;
-        esac
-        if [ "$non_hex" -eq 0 ] && [ "${#ref}" -eq 40 ] \
-          && [ "$(git -C "$toolkit_dir" rev-parse HEAD)" != "$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')" ]; then
-          echo "resolved toolkit commit does not match pinned ref $ref; Telegram pin will be skipped" >&2
-          rm -rf "$toolkit_dir"
-        fi
-      else
-        echo "toolkit checkout failed; Telegram pin will be skipped" >&2
-        rm -rf "$toolkit_dir"
-      fi
+      set -euo pipefail
+      chmod +x scripts/resolve_ci_toolkit.sh
+      bash scripts/resolve_ci_toolkit.sh >/dev/null
 
   after_script:
     - |
@@ -256,7 +227,6 @@
         curl -sS ${http1[@]+"${http1[@]}"} \
           --retry "${MAGISK_TELEGRAM_RETRY:-3}" \
           --retry-delay "${MAGISK_TELEGRAM_RETRY_DELAY:-2}" \
-          --retry-all-errors \
           --max-time "${MAGISK_TELEGRAM_TIMEOUT:-60}" \
           "$@"
       }
@@ -632,38 +602,9 @@
     MAGISK_TELEGRAM_RELEASE_SHOW_GITHUB_LINK: "true"
   before_script:
     - |
-      # The rolling pin reads capture_ids.py from the pinned toolkit checkout.
-      ref="main"
-      if [ -n "${MAGISK_CI_TOOLKIT_REF:-}" ]; then
-        ref="$MAGISK_CI_TOOLKIT_REF"
-      fi
-      toolkit_dir="${MAGISK_CI_TOOLKIT_DIR:-$CI_PROJECT_DIR/.magisk-ci-toolkit}"
-      toolkit_repository="${MAGISK_CI_TOOLKIT_REPOSITORY:-https://gitlab.com/magisk3171/shared/magisk-ci-toolkit.git}"
-      case "$toolkit_repository" in
-        https://gitlab.com/*)
-          if [ -n "${CI_JOB_TOKEN:-}" ]; then
-            toolkit_repository="https://gitlab-ci-token:${CI_JOB_TOKEN}@${toolkit_repository#https://}"
-          fi
-          ;;
-      esac
-      rm -rf "$toolkit_dir"
-      if git init --quiet "$toolkit_dir" \
-        && git -C "$toolkit_dir" remote add origin "$toolkit_repository" \
-        && git -C "$toolkit_dir" fetch --quiet --depth 1 origin "$ref" \
-        && git -C "$toolkit_dir" checkout --quiet --detach --force FETCH_HEAD; then
-        non_hex=0
-        case "$ref" in
-          ''|*[!0-9a-fA-F]*) non_hex=1 ;;
-        esac
-        if [ "$non_hex" -eq 0 ] && [ "${#ref}" -eq 40 ] \
-          && [ "$(git -C "$toolkit_dir" rev-parse HEAD)" != "$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')" ]; then
-          echo "resolved toolkit commit does not match pinned ref $ref; Telegram pin will be skipped" >&2
-          rm -rf "$toolkit_dir"
-        fi
-      else
-        echo "toolkit checkout failed; Telegram pin will be skipped" >&2
-        rm -rf "$toolkit_dir"
-      fi
+      set -euo pipefail
+      chmod +x scripts/resolve_ci_toolkit.sh
+      bash scripts/resolve_ci_toolkit.sh >/dev/null
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/'
 
@@ -696,9 +637,10 @@
     - |
       cat > /tmp/magisk_telegram_release.sh <<'MAGISK_TELEGRAM_RELEASE_EOF'
       set -euo pipefail
-      TG_CHAT_ID="${TG_RELEASE_CHAT_ID:-${TG_CHAT_ID:-}}"
-      if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
-        echo "TG_BOT_TOKEN/TG_CHAT_ID not set, skip."
+      TG_APK_CHAT_ID="${TG_CHAT_ID:-}"
+      TG_RELEASE_CHAT_ID_EFFECTIVE="${TG_RELEASE_CHAT_ID:-${TG_CHAT_ID:-}}"
+      if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "$TG_RELEASE_CHAT_ID_EFFECTIVE" ]; then
+        echo "TG_BOT_TOKEN/TG_RELEASE_CHAT_ID not set, skip."
         exit 0
       fi
       TG_API_BASE="${TG_API_BASE:-https://api.telegram.org}"
@@ -963,7 +905,6 @@
         curl -sS ${http1[@]+"${http1[@]}"} \
           --retry "${MAGISK_TELEGRAM_RETRY:-3}" \
           --retry-delay "${MAGISK_TELEGRAM_RETRY_DELAY:-2}" \
-          --retry-all-errors \
           --max-time "${MAGISK_TELEGRAM_TIMEOUT:-60}" \
           "$@"
       }
@@ -1261,6 +1202,7 @@
       }
 
       release_thread="${TG_THREAD_ID:-${TG_GITLAB_RELEASE_THREAD_ID:-}}"
+      apk_thread="${TG_APK_THREAD_ID:-${TG_CI_THREAD_ID:-${TG_GITLAB_THREAD_ID:-}}}"
       project_name="${MAGISK_TELEGRAM_PROJECT_NAME:-$CI_PROJECT_NAME}"
       project_tag="${MAGISK_TELEGRAM_PROJECT_TAG:-#$CI_PROJECT_NAME}"
       version_tag="$(telegram_version_hashtag)"
@@ -1330,6 +1272,68 @@
       release_head+=$'\n'"🔗 $(telegram_html_link "$release_url" "${MAGISK_TELEGRAM_RELEASE_GITLAB_LABEL:-GitLab}")"
       release_head+="$github_line"
       release_head+="$play_line"
+
+      artifact_patterns="${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERNS:-${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERN:-*arm64-v8a*.apk}}"
+      release_artifacts_file="$(mktemp)"
+      while IFS= read -r artifact_pattern; do
+        [ -n "$artifact_pattern" ] || continue
+        find . -type f -name "$artifact_pattern" -print0
+      done <<< "$artifact_patterns" | sort -zu > "$release_artifacts_file"
+      mapfile -d '' release_artifacts < "$release_artifacts_file"
+      rm -f "$release_artifacts_file"
+
+      expected_artifact_count="${MAGISK_TELEGRAM_RELEASE_EXPECTED_ARTIFACT_COUNT:-}"
+      if [ -n "$expected_artifact_count" ]; then
+        [[ "$expected_artifact_count" =~ ^[0-9]+$ ]] || {
+          echo "MAGISK_TELEGRAM_RELEASE_EXPECTED_ARTIFACT_COUNT must be an integer" >&2
+          exit 1
+        }
+        if [ "${#release_artifacts[@]}" -ne "$expected_artifact_count" ]; then
+          echo "Expected $expected_artifact_count Telegram release artifacts, found ${#release_artifacts[@]}" >&2
+          printf '  %s\n' "${release_artifacts[@]}" >&2
+          exit 1
+        fi
+      fi
+
+      if [ "${#release_artifacts[@]}" -gt 0 ]; then
+        [ -n "$TG_APK_CHAT_ID" ] || {
+          echo "TG_CHAT_ID is required for release attachments" >&2
+          exit 1
+        }
+        if [ "${#release_artifacts[@]}" -gt 10 ]; then
+          echo "A release attachment group may contain at most 10 documents" >&2
+          exit 1
+        fi
+        for release_artifact in "${release_artifacts[@]}"; do
+          release_artifact_size="$(stat -c%s "$release_artifact")"
+          if [ "$release_artifact_size" -le 0 ] || [ "$release_artifact_size" -gt "$TG_MAX_FILESIZE" ]; then
+            echo "Release artifact cannot be sent to Telegram: $release_artifact ($release_artifact_size bytes)" >&2
+            exit 1
+          fi
+        done
+
+        artifact_caption="${MAGISK_TELEGRAM_RELEASE_ARTIFACT_CAPTION:-📦 ${project_name} ${release_tag} · release + debug}"
+        TG_CHAT_ID="$TG_APK_CHAT_ID"
+        TELEGRAM_LAST_MESSAGE_IDS=""
+        send_documents_group "$apk_thread" "$(telegram_html_escape "$artifact_caption")" "${release_artifacts[@]}"
+        first_artifact_message_id="${TELEGRAM_LAST_MESSAGE_IDS%%,*}"
+        [[ "$first_artifact_message_id" =~ ^[0-9]+$ ]] || {
+          echo "Telegram did not return an attachment message id" >&2
+          exit 1
+        }
+        if [ -n "${MAGISK_TELEGRAM_APK_LINK_BASE:-}" ]; then
+          telegram_artifact_url="${MAGISK_TELEGRAM_APK_LINK_BASE%/}/${first_artifact_message_id}"
+        elif [[ "$TG_APK_CHAT_ID" == -100* ]]; then
+          telegram_artifact_url="https://t.me/c/${TG_APK_CHAT_ID#-100}/${first_artifact_message_id}"
+        elif [[ "$TG_APK_CHAT_ID" == @* ]]; then
+          telegram_artifact_url="https://t.me/${TG_APK_CHAT_ID#@}/${first_artifact_message_id}"
+        else
+          echo "Cannot derive a Telegram attachment link from chat id: $TG_APK_CHAT_ID" >&2
+          exit 1
+        fi
+        release_head+=$'\n'"🔗 $(telegram_html_link "$telegram_artifact_url" "${MAGISK_TELEGRAM_RELEASE_APK_LABEL:-Telegram 附件}")"
+      fi
+
       release_msg="$release_head"
       # Backend container images, merged from the optional dotenv published by
       # backend:container:manifest. Projects without that job simply skip this.
@@ -1346,20 +1350,9 @@
         release_msg+=$'\n\n'"$(telegram_html_escape "$release_notes_content")"
       fi
 
-      artifact_patterns="${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERNS:-${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERN:-*arm64-v8a*.apk}}"
-      release_artifacts_file="$(mktemp)"
-      while IFS= read -r artifact_pattern; do
-        [ -n "$artifact_pattern" ] || continue
-        find . -type f -name "$artifact_pattern" -print0
-      done <<< "$artifact_patterns" | sort -zu > "$release_artifacts_file"
-      mapfile -d '' release_artifacts < "$release_artifacts_file"
-      rm -f "$release_artifacts_file"
-      if [ "${#release_artifacts[@]}" -eq 0 ]; then
-        echo "No Telegram release artifacts matched configured patterns."
-        send_message "$release_thread" "$release_msg"
-      else
-        send_documents_group "$release_thread" "$release_msg" "${release_artifacts[@]}"
-      fi
+      TG_CHAT_ID="$TG_RELEASE_CHAT_ID_EFFECTIVE"
+      TELEGRAM_LAST_MESSAGE_IDS=""
+      send_message "$release_thread" "$release_msg"
       telegram_pin_latest "$release_thread" release
       MAGISK_TELEGRAM_RELEASE_EOF
       bash /tmp/magisk_telegram_release.sh
