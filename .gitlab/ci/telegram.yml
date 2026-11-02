@@ -1269,10 +1269,7 @@
       if [ -n "$tag_line" ]; then
         release_head+=$'\n'"$(telegram_html_escape "$tag_line")"
       fi
-      release_head+=$'\n'"🔗 $(telegram_html_link "$release_url" "${MAGISK_TELEGRAM_RELEASE_GITLAB_LABEL:-GitLab}")"
-      release_head+="$github_line"
-      release_head+="$play_line"
-
+      telegram_artifact_url=""
       artifact_patterns="${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERNS:-${MAGISK_TELEGRAM_RELEASE_ARTIFACT_PATTERN:-*arm64-v8a*.apk}}"
       release_artifacts_file="$(mktemp)"
       while IFS= read -r artifact_pattern; do
@@ -1313,6 +1310,9 @@
         done
 
         artifact_caption="${MAGISK_TELEGRAM_RELEASE_ARTIFACT_CAPTION:-📦 ${project_name} ${release_tag} · release + debug}"
+        if [ -n "$tag_line" ]; then
+          artifact_caption+=$'\n'"$tag_line"
+        fi
         TG_CHAT_ID="$TG_APK_CHAT_ID"
         TELEGRAM_LAST_MESSAGE_IDS=""
         send_documents_group "$apk_thread" "$(telegram_html_escape "$artifact_caption")" "${release_artifacts[@]}"
@@ -1331,8 +1331,14 @@
           echo "Cannot derive a Telegram attachment link from chat id: $TG_APK_CHAT_ID" >&2
           exit 1
         fi
-        release_head+=$'\n'"🔗 $(telegram_html_link "$telegram_artifact_url" "${MAGISK_TELEGRAM_RELEASE_APK_LABEL:-Telegram 附件}")"
       fi
+
+      if [ -n "$telegram_artifact_url" ]; then
+        release_head+=$'\n'"🔗 $(telegram_html_link "$telegram_artifact_url" "${MAGISK_TELEGRAM_RELEASE_APK_LABEL:-TG直达}")"
+      fi
+      release_head+=$'\n'"🔗 $(telegram_html_link "$release_url" "${MAGISK_TELEGRAM_RELEASE_GITLAB_LABEL:-GitLab}")"
+      release_head+="$github_line"
+      release_head+="$play_line"
 
       release_msg="$release_head"
       # Backend container images, merged from the optional dotenv published by

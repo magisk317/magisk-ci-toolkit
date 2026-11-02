@@ -133,10 +133,15 @@ message_line="$(grep -n -- '--- CALL sendMessage ---' <<< "$captured" | cut -d: 
 assert_contains "$media_call" 'chat_id=-1001234567890' "attachments must use the CI room"
 assert_contains "$media_call" 'message_thread_id=77' "attachments must use the CI topic"
 assert_not_contains "$media_call" 'Refined Hook' "attachment captions must not repeat the changelog"
+assert_contains "$media_call" '#Demo #v3_3_1 #release' "attachment captions must carry the release tags"
 assert_contains "$message_call" 'chat_id=-1009876543210' "release notice must keep its release room"
 assert_contains "$message_call" 'message_thread_id=88' "release notice must keep its release topic"
-assert_contains "$message_call" '<a href="https://t.me/c/1234567890/321">Telegram 附件</a>' \
+assert_contains "$message_call" '<a href="https://t.me/c/1234567890/321">TG直达</a>' \
   "release notice must link the first attachment message"
+tg_link_line="$(grep -n 'TG直达' <<< "$message_call" | cut -d: -f1)"
+gitlab_link_line="$(grep -n 'GitLab</a>' <<< "$message_call" | cut -d: -f1)"
+[[ "$tg_link_line" -lt "$gitlab_link_line" ]] || fail "TG直达 must be the first release link"
+assert_contains "$message_call" '#Demo #v3_3_1 #release' "release notice must carry the release tags"
 assert_not_contains "$captured" '--retry-all-errors' \
   "Telegram POSTs must not retry ambiguous transport failures"
 assert_contains "$captured" 'Demo &gt; Suite' "greater-than signs must use valid HTML entities"
