@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Refuse commits whose author or committer identity drifts from this repository's recent history.
+set -euo pipefail
+
+repo=$(git rev-parse --show-toplevel)
+policy="$repo/ci/commit-identity"
+if [ -f "$policy" ]; then
+  expected_name=$(sed -n 's/^name=//p' "$policy" | head -n 1)
+  expected_email=$(sed -n 's/^email=//p' "$policy" | head -n 1)
+else
+  baseline=$(git -C "$repo" log -20 --format='%an%x09%ae' 2>/dev/null | awk -F '\t' '
+    NF >= 2 { count[$0]++; if (count[$0] > max) { max = count[$0]; winner = $0 } }
+    END { print winner }
+  ')
+  [ -n "$baseline" ] || exit 0
+  expected_name=${baseline%%$'\t'*}
+  expected_email=${baseline#*$'\t'}
+fi
+[ -n "$expected_name" ] && [ -n "$expected_email" ] || {
+  echo "pre-commit: incomplete identity policy in $policy" >&2
+  exit 1
+}
+parse_identity() {
+  local ident="$1"
+  local name="${ident%% <*}"
+  local email="${ident#*<}"
+  email="${email%%>*}"
+  printf '%s\t%s\n' "$name" "$email"
+}
+
+for role in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+  ident=$(git var "$role")
+  parsed=$(parse_identity "$ident")
+  actual_name=${parsed%%$'\t'*}
+  actual_email=${parsed#*$'\t'}
+  if [ "$actual_name" != "$expected_name" ] || [ "$actual_email" != "$expected_email" ]; then
+    printf '%s\n' \
+      "pre-commit: identity mismatch ($role)" \
+      "  repository: $repo" \
+      "  expected from recent history: $expected_name <$expected_email>" \
+      "  actual: $actual_name <$actual_email>" \
+      "  inspect git log and the repository remote before changing identity." >&2
+    exit 1
+  fi
+done
+
+
+pointer_gate="${MAGISK_POINTER_GATE:-/root/play/magisk-ci-toolkit/ci/git_hooks/pointer_gate.py}"
+if [ -f "$pointer_gate" ]; then
+  python3 "$pointer_gate" --mode pre-commit --repo "$repo"
+fi

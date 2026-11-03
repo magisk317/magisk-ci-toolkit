@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Submodule-pointer alignment gate, meant to be wired into git hooks at two moments.
 
+  pre-commit  blocks a parent commit until changed submodules are committed locally
   post-commit  report only - every commit prints the alignment table for this repo
   pre-push     blocks the push when a pointer would break a clone or a CI checkout
 
@@ -37,12 +38,24 @@ INCLUDE_REF = re.compile(r"ref:\s*['\"]?([0-9a-f]{40})['\"]?")
 
 
 def git(repo: Path, *args: str) -> tuple[str, int]:
+    env = os.environ.copy()
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        env.pop(key, None)
     try:
         done = subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
     except OSError as error:  # git missing
         return "", 127
@@ -96,6 +109,16 @@ def checkout_head(sub: Path) -> str:
     if rc != 0 or Path(top).resolve() != sub.resolve():
         return ""
     return head
+
+
+def index_gitlink(repo: Path, path: str) -> str:
+    out, rc = git(repo, "ls-files", "-s", "--", path)
+    parts = out.split()
+    return parts[1] if rc == 0 and len(parts) >= 4 and parts[0] == "160000" else ""
+
+
+def submodule_dirty(sub: Path) -> tuple[str, int]:
+    return git(sub, "status", "--porcelain", "--untracked-files=all")
 
 
 def remote_tip(sub: Path, branch: str, live: bool) -> tuple[str, str]:
@@ -190,9 +213,40 @@ def evaluate(repo: Path, live: bool) -> tuple[list[str], list[str], list[str]]:
     return rows, drift, failures
 
 
+def evaluate_pre_commit(repo: Path) -> tuple[list[str], list[str], list[str]]:
+    rows, drift, failures = [], [], []
+    branch = current_branch(repo)
+    if branch is None:
+        return rows, drift, ["detached HEAD - cannot map the recorded branch"]
+
+    for name, path, _sub_branch in submodule_paths(repo):
+        sub = repo / path
+        index = index_gitlink(repo, path)
+        tree = checkout_head(sub) if sub.is_dir() else ""
+        dirty, dirty_rc = submodule_dirty(sub) if sub.is_dir() else ("", 1)
+        rows.append(
+            "  %-18s index=%s tree=%s dirty=%s"
+            % (name, short(index), short(tree), "yes" if dirty else "no")
+        )
+        if not index:
+            failures.append("%s: no staged gitlink at %s" % (name, path))
+            continue
+        if not tree:
+            failures.append("%s: submodule checkout is unavailable at %s" % (name, path))
+            continue
+        if dirty_rc != 0 or dirty:
+            failures.append("%s: submodule has uncommitted changes; commit it before the parent" % name)
+        if tree != index:
+            failures.append(
+                "%s: staged gitlink %s != submodule HEAD %s; stage the parent pointer after committing the submodule"
+                % (name, short(index), short(tree))
+            )
+    return rows, drift, failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("post-commit", "pre-push"), required=True)
+    parser.add_argument("--mode", choices=("pre-commit", "post-commit", "pre-push"), required=True)
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--quiet-clean", action="store_true", help="print only when something is wrong")
     args = parser.parse_args()
@@ -200,7 +254,10 @@ def main() -> int:
     repo = Path(args.repo).resolve()
     live = args.mode == "pre-push"
     title = "submodule pointer gate (%s) - %s" % (args.mode, repo.name)
-    rows, drift, failures = evaluate(repo, live)
+    if args.mode == "pre-commit":
+        rows, drift, failures = evaluate_pre_commit(repo)
+    else:
+        rows, drift, failures = evaluate(repo, live)
 
     if args.mode == "pre-push" and FLEET_CHECKER.is_file():
         done = subprocess.run(
@@ -223,15 +280,19 @@ def main() -> int:
         for row in rows:
             print(row)
 
-    blocking = args.mode == "pre-push"
+    blocking = args.mode in ("pre-commit", "pre-push")
     for message in failures:
         print("FAIL %s" % message, file=sys.stderr)
     for message in drift:
         print("%s %s" % ("DRIFT" if blocking else "note ", message), file=sys.stderr)
 
     if blocking and failures:
-        print("push refused: fix the pointers above (shared repos first, then the parents)",
-              file=sys.stderr)
+        message = (
+            "commit refused: commit submodule changes and stage the parent gitlink"
+            if args.mode == "pre-commit"
+            else "push refused: fix the pointers above (shared repos first, then the parents)"
+        )
+        print(message, file=sys.stderr)
         return 1
     return 0
 
