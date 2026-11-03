@@ -9,7 +9,7 @@
 set -uo pipefail
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLAY="${MAGISK_PLAY_ROOT:-/root/play}"
-REPOS="XposedSmsCode xinyi-relay push/MiPushFramework sesame TouchPilot serialbridge \
+REPOS="XposedSmsCode xinyi-relay push/MiPushFramework push/MiPushZygisk sesame TouchPilot serialbridge \
        magisk-ui-kit magisk-xposed-kit magisk-smscode-core magisk-smscode-rules magisk-build-logic \
        magisk-ci-toolkit magisk-mobile-private"
 DRY=0
