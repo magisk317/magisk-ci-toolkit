@@ -54,14 +54,17 @@ echo 'Merge branch '\''renovate/java-patch'\'' into '\''beta'\''' > "$tmp_dir/wo
 
 curl() {
   printf '%s\n' "$@" > "$CAPTURE_FILE"
+  printf '%s\n' '{"ok":true,"result":[{"message_id":123}]}'
 }
 export -f curl
 CAPTURE_FILE="$capture" \
+MAGISK_CI_TOOLKIT_DIR="$root_dir" \
 TG_BOT_TOKEN=test \
 TG_CHAT_ID=test \
 MAGISK_TELEGRAM_PROJECT_NAME=MiPushFramework \
 MAGISK_TELEGRAM_PROJECT_TAG='#MiPushFramework' \
 MAGISK_TELEGRAM_VERSION_NAME=1.0.1 \
+MAGISK_TELEGRAM_PIN=false \
 CI_PROJECT_NAME=MiPushFramework \
 CI_COMMIT_BRANCH=beta \
 CI_COMMIT_SHA="$merge_sha" \
