@@ -78,6 +78,7 @@ shell:test:
       ci/tests/test_cancel_merged_mr_pipelines.sh
       ci/tests/test_allocate_version_code.sh
       ci/tests/test_allocated_version_code.sh
+      ci/tests/test_beta_delivery_rules.sh
       ci/tests/test_ci_predefined_variables.sh
       ci/tests/test_auto_merge_upstream_mr.sh
       ci/tests/test_auto_merge_self_renovate_mrs.sh
@@ -121,6 +122,7 @@ shell:test:
     - bash gradle/tests/test_build_guard_drift.sh
     - bash ci/tests/test_allocate_version_code.sh
     - bash ci/tests/test_allocated_version_code.sh
+    - bash ci/tests/test_beta_delivery_rules.sh
     - bash release/tests/test_gitlab_release.sh
     - bash release/tests/test_release_notes.sh
     - bash release/tests/test_validate_android_apk_signatures.sh

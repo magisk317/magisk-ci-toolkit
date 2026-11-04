@@ -29,6 +29,23 @@
 #   MAGISK_TELEGRAM_LEGACY_NOTICE_TZ       notice timestamp zone (default
 #                                          Asia/Shanghai)
 
+# Renovate keeps automatic beta notifications; human-authored beta pipelines
+# expose a non-blocking manual delivery action instead.
+.magisk_telegram_ci_delivery_rules:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "beta" && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_AUTHOR =~ /Renovate317@users.noreply/ && $RELEASE_KEYSTORE != "" && $STORE_PASSWORD != "" && $KEY_ALIAS != "" && $KEY_PASSWORD != ""'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "beta" && $CI_PIPELINE_SOURCE == "push" && $RELEASE_KEYSTORE != "" && $STORE_PASSWORD != "" && $KEY_ALIAS != "" && $KEY_PASSWORD != ""'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "beta" && $CI_PIPELINE_SOURCE == "web" && $RELEASE_KEYSTORE != "" && $STORE_PASSWORD != "" && $KEY_ALIAS != "" && $KEY_PASSWORD != ""'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "beta" && $CI_PIPELINE_SOURCE == "api" && $RELEASE_KEYSTORE != "" && $STORE_PASSWORD != "" && $KEY_ALIAS != "" && $KEY_PASSWORD != ""'
+      when: manual
+      allow_failure: true
+    - when: never
+
 .magisk_telegram_ci:
   image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.2"
   stage: notify
