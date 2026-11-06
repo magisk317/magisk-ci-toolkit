@@ -9,7 +9,9 @@ Usage:
 The expected certificate is read from MAGISK_ANDROID_RELEASE_CERT_SHA256.
 MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES selects output directories (default:
 "release"). When both release and debug are selected, every package/versionCode
-pair must exist in both sets and debug APKs must be debuggable.
+pair must exist in both sets. Debug APKs must be debuggable unless
+MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG=true is set for a deliberately
+minified debug artifact.
 EOF
 }
 
@@ -61,6 +63,15 @@ if [[ "${#build_types[@]}" -eq 0 ]]; then
   echo "ERROR: MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES must name at least one build type" >&2
   exit 2
 fi
+
+allow_nondebuggable_debug="${MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG:-false}"
+case "$allow_nondebuggable_debug" in
+  true|false) ;;
+  *)
+    echo "ERROR: MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG must be true or false" >&2
+    exit 2
+    ;;
+esac
 
 mapfile -t apk_files < <(
   for root in "${roots[@]}"; do
@@ -147,8 +158,11 @@ for apk in "${apk_files[@]}"; do
       ;;
     debug)
       if ! grep -q '^application-debuggable' <<< "$badging_output"; then
-        echo "ERROR: debug APK is not debuggable: $apk" >&2
-        exit 1
+        if [[ "$allow_nondebuggable_debug" != true ]]; then
+          echo "ERROR: debug APK is not debuggable: $apk" >&2
+          exit 1
+        fi
+        echo "INFO: allowing non-debuggable debug APK as a minified debug artifact: $apk"
       fi
       debug_coordinates["$coordinate"]=1
       ;;

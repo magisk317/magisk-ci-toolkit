@@ -23,7 +23,7 @@ apk="${!#}"
 version_code=123
 [[ "${AAPT2_DEBUG_VERSION_MISMATCH:-0}" == 1 && "$apk" == */debug/* ]] && version_code=124
 printf "package: name='com.example.demo' versionCode='%s' versionName='1.2.3'\n" "$version_code"
-[[ "$apk" == */debug/* ]] && printf 'application-debuggable\n'
+[[ "$apk" == */debug/* && "${AAPT2_DEBUGGABLE:-1}" == 1 ]] && printf 'application-debuggable\n'
 exit 0
 EOF
 chmod +x "$tmp_dir/apksigner" "$tmp_dir/aapt2"
@@ -34,6 +34,31 @@ MAGISK_ANDROID_RELEASE_CERT_SHA256="$expected" \
 MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES="release debug" \
 MAGISK_ANDROID_RELEASE_EXPECTED_APK_COUNT=2 \
   bash "$validator" "$tmp_dir/app/build/outputs/apk" >/dev/null
+
+if PATH="$tmp_dir:$PATH" \
+   AAPT2_DEBUGGABLE=0 \
+   MAGISK_ANDROID_RELEASE_CERT_SHA256="$expected" \
+   MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES="release debug" \
+   bash "$validator" "$tmp_dir/app/build/outputs/apk" >/dev/null 2>&1; then
+  echo "FAIL: non-debuggable debug APK was accepted without the opt-in" >&2
+  exit 1
+fi
+
+PATH="$tmp_dir:$PATH" \
+AAPT2_DEBUGGABLE=0 \
+MAGISK_ANDROID_RELEASE_CERT_SHA256="$expected" \
+MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES="release debug" \
+MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG=true \
+  bash "$validator" "$tmp_dir/app/build/outputs/apk" >/dev/null
+
+if PATH="$tmp_dir:$PATH" \
+   MAGISK_ANDROID_RELEASE_CERT_SHA256="$expected" \
+   MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES="release debug" \
+   MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG=maybe \
+   bash "$validator" "$tmp_dir/app/build/outputs/apk" >/dev/null 2>&1; then
+  echo "FAIL: invalid non-debuggable debug opt-in was accepted" >&2
+  exit 1
+fi
 
 if PATH="$tmp_dir:$PATH" \
    MAGISK_ANDROID_RELEASE_CERT_SHA256="$(printf '0%.0s' {1..64})" \

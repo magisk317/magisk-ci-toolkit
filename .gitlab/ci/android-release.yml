@@ -109,6 +109,10 @@
 #   MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES          optional  validator output
 #                                                             types, default "release"
 #   MAGISK_ANDROID_RELEASE_MAX_APK_BYTES            optional  per-file size cap, 0 disables
+#   MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG optional  allow a minified debug
+#                                                             artifact without the
+#                                                             application-debuggable flag;
+#                                                             default "false"
 #   MAGISK_ANDROID_RELEASE_APK_ROOTS                optional  default "app/build/outputs/apk"
 #   MAGISK_ANDROID_RELEASE_KEYSTORE_PATH            optional  default "$CI_PROJECT_DIR/release.jks"
 #   MAGISK_ANDROID_RELEASE_INJECT_VERSION           optional  default "true"
