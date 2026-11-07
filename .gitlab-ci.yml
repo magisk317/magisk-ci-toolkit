@@ -34,6 +34,10 @@ include:
   # anchor through their own pipelines (sync:github, bundle refreshers, ...);
   # this repository's own alpine jobs extend it below.
   - local: /.gitlab/ci/utility.yml
+  # Local include of the multi-arch CI image build chain. Builds and publishes
+  # the docker/ci/Dockerfile targets (utility, android-jdk, zygisk-rust,
+  # webui-bun) to this project registry on default-branch pushes only.
+  - local: /.gitlab/ci/docker.yml
   # Local include of the GitHub redundancy-mirror anchor. Consumers reference
   # .magisk_github_sync through their own pipelines; including it here keeps
   # this repository's own default branch mirrored with the same rules the
@@ -42,6 +46,7 @@ include:
 
 stages:
   - test
+  - image
   - maintenance
   - control
   - sync

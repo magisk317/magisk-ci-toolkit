@@ -1,0 +1,183 @@
+# Multi-arch build chain for the toolkit CI images (docker/ci/Dockerfile).
+#
+# Design:
+#   - One native build job per architecture (amd64 on the Debian runner,
+#     arm64 on the Oracle runner): build every target, smoke-test it, push
+#     `<version>-<arch>` tags to this project's registry.
+#   - A manifest job then assembles the multi-arch `<version>` (+ latest)
+#     manifests from the registry-side arch tags — no cross-arch emulation.
+#   - Tags follow the upstream base versions (see docker/ci/versions.env):
+#     utility → full Alpine release (e.g. 3.24.2) read from the built image,
+#     android-jdk → Temurin tag (27_35), zygisk-rust → Rust (1.99.1),
+#     webui-bun → Bun (1.4.4).
+#   - Consumers must pin an immutable `<version>` tag (or digest); `latest`
+#     exists only as a convenience and MUST NOT be referenced from consumer
+#     pipelines.
+#
+# Push permissions use CI_JOB_TOKEN against this project's own registry —
+# no extra token required.
+
+.docker:build:base:
+  stage: image
+  image: "docker:29-cli"
+  services:
+    - name: "docker:29-dind"
+      command: ["--tls=false", "--mtu=1400"]
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+    BUILDKIT_PROGRESS: "plain"
+    MAGISK_CI_TARGETS: "utility android-jdk zygisk-rust webui-bun"
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  before_script:
+    - |
+      set -eu
+      . ./docker/ci/versions.env
+      export MAGISK_CI_REGISTRY_IMAGE="$CI_REGISTRY_IMAGE"
+      export MAGISK_CI_ARCH_TAG
+      echo "$CI_JOB_TOKEN" | docker login "$CI_REGISTRY" -u gitlab-ci-token --password-stdin
+  script:
+    - |
+      set -eu
+      BUILD_ARGS=(
+        --build-arg "ALPINE_VERSION=${MAGISK_CI_ALPINE_VERSION}"
+        --build-arg "GH_VERSION=${MAGISK_CI_GH_VERSION}"
+        --build-arg "TEMURIN_TAG=${MAGISK_CI_TEMURIN_TAG}"
+        --build-arg "RUST_TAG=${MAGISK_CI_RUST_TAG}"
+        --build-arg "BUN_TAG=${MAGISK_CI_BUN_TAG}"
+      )
+      for target in ${MAGISK_CI_TARGETS}; do
+        echo "=== building ${target} (linux/${MAGISK_CI_DOCKER_ARCH}) ==="
+        docker build \
+          --platform "linux/${MAGISK_CI_DOCKER_ARCH}" \
+          --target "$target" \
+          "${BUILD_ARGS[@]}" \
+          --file docker/ci/Dockerfile \
+          --tag "magisk-ci-tmp:${target}" \
+          .
+        # Smoke test: assert the baked toolchain actually runs on this arch.
+        case "$target" in
+          utility)
+            docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'gh --version && shellcheck --version | head -n1'
+            ;;
+          android-jdk)
+            docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'java --version && fakeroot --version'
+            ;;
+          zygisk-rust)
+            docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'rustc --version && cargo --version && rustup target list --installed | grep -q aarch64-linux-android'
+            ;;
+          webui-bun)
+            docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'bun --version && git --version'
+            ;;
+        esac
+        case "$target" in
+          utility)
+            # Tag follows the full Alpine release of the base image (e.g. 3.24.2).
+            UTILITY_ALPINE_RELEASE="$(docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'cat /etc/alpine-release')"
+            echo "UTILITY_ALPINE_RELEASE=${UTILITY_ALPINE_RELEASE}" >> magisk_ci_image.env
+            docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/utility:${UTILITY_ALPINE_RELEASE}-${MAGISK_CI_ARCH_TAG}"
+            docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/utility:${MAGISK_CI_ALPINE_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            docker push "${MAGISK_CI_REGISTRY_IMAGE}/utility:${UTILITY_ALPINE_RELEASE}-${MAGISK_CI_ARCH_TAG}"
+            docker push "${MAGISK_CI_REGISTRY_IMAGE}/utility:${MAGISK_CI_ALPINE_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            ;;
+          android-jdk)
+            docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/android-jdk:${MAGISK_CI_TEMURIN_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            docker push "${MAGISK_CI_REGISTRY_IMAGE}/android-jdk:${MAGISK_CI_TEMURIN_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            ;;
+          zygisk-rust)
+            docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/zygisk-rust:${MAGISK_CI_RUST_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            docker push "${MAGISK_CI_REGISTRY_IMAGE}/zygisk-rust:${MAGISK_CI_RUST_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            ;;
+          webui-bun)
+            docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/webui-bun:${MAGISK_CI_BUN_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            docker push "${MAGISK_CI_REGISTRY_IMAGE}/webui-bun:${MAGISK_CI_BUN_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            ;;
+        esac
+      done
+  artifacts:
+    reports:
+      dotenv: magisk_ci_image.env
+
+# Image jobs only run on default-branch pushes: scheduled pipelines exist
+# solely for Renovate, and MR pipelines must never publish tags.
+.rules:docker_images:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "pipeline"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+
+docker:build:amd64:
+  extends:
+    - .docker:build:base
+    - .rules:docker_images
+  tags:
+    - magisk-amd64-linux
+  variables:
+    MAGISK_CI_DOCKER_ARCH: "amd64"
+    MAGISK_CI_ARCH_TAG: "amd64"
+
+docker:build:arm64:
+  extends:
+    - .docker:build:base
+    - .rules:docker_images
+  tags:
+    - magisk-arm64-linux
+  variables:
+    MAGISK_CI_DOCKER_ARCH: "arm64"
+    MAGISK_CI_ARCH_TAG: "arm64"
+
+# Assemble the multi-arch manifests from the registry-side arch tags. This job
+# never builds anything: imagetools only stitches existing manifests together,
+# so it can run on either architecture.
+docker:manifest:
+  extends: .rules:docker_images
+  stage: image
+  image: "docker:29-cli"
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
+    MAGISK_CI_TARGETS: "utility android-jdk zygisk-rust webui-bun"
+  needs:
+    - job: docker:build:amd64
+      artifacts: true
+    - job: docker:build:arm64
+      artifacts: true
+  resource_group: "magisk-ci-toolkit-image-manifest"
+  before_script:
+    - |
+      set -eu
+      . ./docker/ci/versions.env
+      echo "$CI_JOB_TOKEN" | docker login "$CI_REGISTRY" -u gitlab-ci-token --password-stdin
+  script:
+    - |
+      set -eu
+      create_manifest() {
+        target="$1"
+        version="$2"
+        docker buildx imagetools create \
+          --tag "${CI_REGISTRY_IMAGE}/${target}:${version}" \
+          "${CI_REGISTRY_IMAGE}/${target}:${version}-amd64" \
+          "${CI_REGISTRY_IMAGE}/${target}:${version}-arm64"
+        docker buildx imagetools create \
+          --tag "${CI_REGISTRY_IMAGE}/${target}:latest" \
+          "${CI_REGISTRY_IMAGE}/${target}:${version}-amd64" \
+          "${CI_REGISTRY_IMAGE}/${target}:${version}-arm64"
+      }
+      create_manifest utility "${UTILITY_ALPINE_RELEASE:?alpine release missing from arch jobs}"
+      create_manifest utility "${MAGISK_CI_ALPINE_VERSION}"
+      create_manifest android-jdk "${MAGISK_CI_TEMURIN_VERSION}"
+      create_manifest zygisk-rust "${MAGISK_CI_RUST_VERSION}"
+      create_manifest webui-bun "${MAGISK_CI_BUN_VERSION}"
+      echo "=== published multi-arch manifests ==="
+      echo "utility:      ${UTILITY_ALPINE_RELEASE}, ${MAGISK_CI_ALPINE_VERSION}"
+      echo "android-jdk:  ${MAGISK_CI_TEMURIN_VERSION}"
+      echo "zygisk-rust:  ${MAGISK_CI_RUST_VERSION}"
+      echo "webui-bun:    ${MAGISK_CI_BUN_VERSION}"
