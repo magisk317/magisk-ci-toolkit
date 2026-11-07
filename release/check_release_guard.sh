@@ -453,6 +453,16 @@ check_submodule_pointers() {
     echo "FAIL: pointer gate not found: $script" >&2
     return 1
   fi
+  # CI always checks out a detached HEAD (branch or tag pipeline), where the
+  # gate cannot map a recorded branch; pointers were already proven by the
+  # pre-push gate on the releasing machine, and an unreachable gitlink fails
+  # the CI checkout itself. The check therefore guards the local pre-release
+  # state only.
+  if git -C "$root_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && ! git -C "$root_dir" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    echo "SKIP: detached HEAD (tag or CI checkout); pointers proven at push time"
+    return 0
+  fi
   if [[ ! -f "${root_dir}/.gitmodules" ]] \
     && [[ -z "$(git -C "$root_dir" ls-tree -r HEAD 2>/dev/null | grep 160000 || true)" ]]; then
     echo "SKIP: no submodules"
