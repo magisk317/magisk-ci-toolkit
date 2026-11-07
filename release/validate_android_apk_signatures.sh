@@ -132,9 +132,12 @@ for apk in "${apk_files[@]}"; do
     exit 1
   fi
   package_line="$(printf '%s\n' "$badging_output" | sed -n 's/^package: //p' | head -n 1)"
-  package_name="$(printf '%s\n' "$package_line" | sed -nE "s/.*name='([^']+)'.*/\1/p")"
-  version_code="$(printf '%s\n' "$package_line" | sed -nE "s/.*versionCode='([^']+)'.*/\1/p")"
-  version_name="$(printf '%s\n' "$package_line" | sed -nE "s/.*versionName='([^']*)'.*/\1/p")"
+  # Anchor each field to its known token. A greedy `.*name=` also matches
+  # platformBuildVersionName later on the same aapt2 line and can turn the
+  # package name into the platform codename (for example, "17").
+  package_name="$(printf '%s\n' "$package_line" | sed -nE "s/^name='([^']+)'.*/\1/p")"
+  version_code="$(printf '%s\n' "$package_line" | sed -nE "s/^name='[^']+' versionCode='([^']+)'.*/\1/p")"
+  version_name="$(printf '%s\n' "$package_line" | sed -nE "s/^name='[^']+' versionCode='[^']+' versionName='([^']*)'.*/\1/p")"
   if [[ -z "$package_name" || -z "$version_code" ]]; then
     echo "ERROR: APK package metadata is incomplete: $apk" >&2
     exit 1

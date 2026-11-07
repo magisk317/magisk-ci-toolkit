@@ -23,7 +23,7 @@ apk="${!#}"
 version_code=123
 [[ "${AAPT2_DEBUG_VERSION_MISMATCH:-0}" == 1 && "$apk" == */debug/* ]] && version_code=124
 version_name="${AAPT2_DEBUG_VERSION_NAME:-1.2.3}"
-printf "package: name='com.example.demo' versionCode='%s' versionName='%s'\n" "$version_code" "$version_name"
+printf "package: name='com.example.demo' versionCode='%s' versionName='%s' platformBuildVersionName='17' platformBuildVersionCode='37'\n" "$version_code" "$version_name"
 [[ "$apk" == */debug/* && "${AAPT2_DEBUGGABLE:-1}" == 1 ]] && printf 'application-debuggable\n'
 exit 0
 EOF
