@@ -360,6 +360,23 @@
       fi
 
 
+# Canonical rules for the debug/CI android:build job. A job-level `rules:` list
+# replaces whatever `extends` inherits, so consumers used to restate these
+# exclusions inline and drifted (some forgot the schedule exclusion, burning a
+# full arm64 build on every scheduled pipeline). Extend this anchor instead of
+# declaring job-level rules: it skips MR / renovate / schedule pipelines and only
+# builds a branch when release signing credentials are present.
+.magisk_android_build_rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^renovate\//'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH && $RELEASE_KEYSTORE != "" && $STORE_PASSWORD != "" && $KEY_ALIAS != "" && $KEY_PASSWORD != ""'
+    - when: never
+
 .magisk_android_build:
   extends: .magisk_android_base
   stage: build
