@@ -44,19 +44,19 @@
   script:
     - |
       set -eu
-      BUILD_ARGS=(
-        --build-arg "ALPINE_VERSION=${MAGISK_CI_ALPINE_VERSION}"
-        --build-arg "GH_VERSION=${MAGISK_CI_GH_VERSION}"
-        --build-arg "TEMURIN_TAG=${MAGISK_CI_TEMURIN_TAG}"
-        --build-arg "RUST_TAG=${MAGISK_CI_RUST_TAG}"
-        --build-arg "BUN_TAG=${MAGISK_CI_BUN_TAG}"
-      )
+      # POSIX sh (alpine ash) — no arrays.
+      BUILD_ARGS="--build-arg ALPINE_VERSION=${MAGISK_CI_ALPINE_VERSION} \
+        --build-arg GH_VERSION=${MAGISK_CI_GH_VERSION} \
+        --build-arg TEMURIN_TAG=${MAGISK_CI_TEMURIN_TAG} \
+        --build-arg RUST_TAG=${MAGISK_CI_RUST_TAG} \
+        --build-arg BUN_TAG=${MAGISK_CI_BUN_TAG}"
       for target in ${MAGISK_CI_TARGETS}; do
         echo "=== building ${target} (linux/${MAGISK_CI_DOCKER_ARCH}) ==="
+        # shellcheck disable=SC2086
         docker build \
           --platform "linux/${MAGISK_CI_DOCKER_ARCH}" \
           --target "$target" \
-          "${BUILD_ARGS[@]}" \
+          $BUILD_ARGS \
           --file docker/ci/Dockerfile \
           --tag "magisk-ci-tmp:${target}" \
           .
