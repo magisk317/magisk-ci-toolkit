@@ -22,7 +22,8 @@ cat > "$tmp_dir/aapt2" <<'EOF'
 apk="${!#}"
 version_code=123
 [[ "${AAPT2_DEBUG_VERSION_MISMATCH:-0}" == 1 && "$apk" == */debug/* ]] && version_code=124
-printf "package: name='com.example.demo' versionCode='%s' versionName='1.2.3'\n" "$version_code"
+version_name="${AAPT2_DEBUG_VERSION_NAME:-1.2.3}"
+printf "package: name='com.example.demo' versionCode='%s' versionName='%s'\n" "$version_code" "$version_name"
 [[ "$apk" == */debug/* && "${AAPT2_DEBUGGABLE:-1}" == 1 ]] && printf 'application-debuggable\n'
 exit 0
 EOF
@@ -46,6 +47,14 @@ fi
 
 PATH="$tmp_dir:$PATH" \
 AAPT2_DEBUGGABLE=0 \
+MAGISK_ANDROID_RELEASE_CERT_SHA256="$expected" \
+MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES="release debug" \
+MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG=true \
+  bash "$validator" "$tmp_dir/app/build/outputs/apk" >/dev/null
+
+PATH="$tmp_dir:$PATH" \
+AAPT2_DEBUGGABLE=0 \
+AAPT2_DEBUG_VERSION_NAME="1.2.3-20261107_000000" \
 MAGISK_ANDROID_RELEASE_CERT_SHA256="$expected" \
 MAGISK_ANDROID_RELEASE_APK_BUILD_TYPES="release debug" \
 MAGISK_ANDROID_RELEASE_ALLOW_NON_DEBUGGABLE_DEBUG=true \

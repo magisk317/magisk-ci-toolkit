@@ -139,7 +139,10 @@ for apk in "${apk_files[@]}"; do
     echo "ERROR: APK package metadata is incomplete: $apk" >&2
     exit 1
   fi
-  coordinate="${package_name}|${version_code}|${version_name}"
+  # Debug artifacts intentionally carry a timestamp suffix in versionName so
+  # CI/OTA builds remain distinguishable. The release/debug companion contract
+  # is therefore package + versionCode, not an exact versionName match.
+  coordinate="${package_name}|${version_code}"
 
   build_type=""
   for candidate_type in "${build_types[@]}"; do
