@@ -444,6 +444,150 @@ run_project_checks() {
 }
 
 # Main entry point — call this from your repo's wrapper script
+check_submodule_pointers() {
+  local root_dir="$1"
+  local toolkit_dir script out
+  toolkit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  script="${toolkit_dir}/ci/git_hooks/pointer_gate.py"
+  if [[ ! -f "$script" ]]; then
+    echo "FAIL: pointer gate not found: $script" >&2
+    return 1
+  fi
+  if [[ ! -f "${root_dir}/.gitmodules" ]] \
+    && [[ -z "$(git -C "$root_dir" ls-tree -r HEAD 2>/dev/null | grep 160000 || true)" ]]; then
+    echo "SKIP: no submodules"
+    return 0
+  fi
+  # pre-push semantics without a push: unreachable gitlinks and toolkit include
+  # refs fail; a remote branch behind the local chain only prints DRIFT notes,
+  # which is the normal state between a retag and its push.
+  if out="$(python3 "$script" --mode pre-push --repo "$root_dir" --quiet-clean 2>&1)"; then
+    echo "PASS: submodule pointers and toolkit include ref reachable"
+    if [[ -n "$out" ]]; then printf '%s\n' "$out" >&2; fi
+    return 0
+  fi
+  printf '%s\n' "$out" >&2
+  echo "FAIL: submodule pointer gate refused the current state" >&2
+  return 1
+}
+
+check_toolkit_pin() {
+  local root_dir="$1"
+  if ! grep -q "magisk-ci-toolkit" "${root_dir}/.gitlab-ci.yml" 2>/dev/null; then
+    echo "SKIP: no toolkit pin surfaces in .gitlab-ci.yml"
+    return 0
+  fi
+  local toolkit_dir script out
+  toolkit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  script="${toolkit_dir}/ci/verify_toolkit_pin.sh"
+  if [[ ! -f "$script" ]]; then
+    echo "FAIL: toolkit pin verifier not found: $script" >&2
+    return 1
+  fi
+  if out="$(bash "$script" --root "$root_dir" 2>&1)"; then
+    echo "PASS: ${out}"
+    return 0
+  fi
+  printf '%s\n' "$out" >&2
+  echo "FAIL: toolkit pin surfaces disagree" >&2
+  return 1
+}
+
+check_gradle_wrapper_sha() {
+  local root_dir="$1"
+  local props="${root_dir}/gradle/wrapper/gradle-wrapper.properties"
+  if [[ ! -f "$props" ]]; then
+    echo "SKIP: no gradle wrapper properties"
+    return 0
+  fi
+  local url sha version
+  url="$(sed -nE 's/^distributionUrl[=:][[:space:]]*//p' "$props" | head -n1 | tr -d '\r')"
+  sha="$(sed -nE 's/^distributionSha256Sum[=:][[:space:]]*//p' "$props" | head -n1 | tr -d '\r')"
+  if [[ -z "$url" ]]; then
+    echo "FAIL: gradle wrapper has no distributionUrl" >&2
+    return 1
+  fi
+  if [[ "$url" != *.zip ]]; then
+    echo "FAIL: gradle wrapper distributionUrl does not end in a zip: $url" >&2
+    return 1
+  fi
+  if [[ -z "$sha" ]]; then
+    # The Renovate half-upgrade: the URL moves and the checksum stays behind.
+    echo "FAIL: gradle wrapper pins a distribution but no distributionSha256Sum" >&2
+    return 1
+  fi
+  if [[ ! "$sha" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "FAIL: gradle wrapper distributionSha256Sum is not a sha256: $sha" >&2
+    return 1
+  fi
+  version="$(printf '%s' "$url" | sed -nE 's#.*/gradle-([^-]+)-[^/]*\.zip#\1#p')"
+  echo "PASS: gradle wrapper ${version:-distribution} sha256 pinned"
+  return 0
+}
+
+check_gitlab_ci_lint() {
+  local root_dir="$1"
+  local yml="${root_dir}/.gitlab-ci.yml"
+  if [[ ! -f "$yml" ]]; then
+    echo "SKIP: no .gitlab-ci.yml to lint"
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "SKIP: curl unavailable for the GitLab CI lint"
+    return 0
+  fi
+  local header
+  if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+    header="PRIVATE-TOKEN: ${GITLAB_TOKEN}"
+  elif [[ -n "${CI_JOB_TOKEN:-}" ]]; then
+    header="JOB-TOKEN: ${CI_JOB_TOKEN}"
+  else
+    echo "SKIP: GitLab CI lint needs GITLAB_TOKEN or CI_JOB_TOKEN"
+    return 0
+  fi
+  local api remote path enc project_id payload resp valid
+  api="${CI_API_V4_URL:-https://gitlab.com/api/v4}"
+  remote="$(git -C "$root_dir" remote get-url origin 2>/dev/null || true)"
+  path="$(printf '%s' "$remote" | sed -nE 's#.*gitlab\.com[:/](.+)\.git$#\1#p')"
+  if [[ -z "$path" ]]; then
+    echo "SKIP: origin is not a gitlab.com remote (${remote:-none})"
+    return 0
+  fi
+  enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$path")"
+  project_id="$(curl -sS --max-time 30 --header "$header" "$api/projects/$enc" 2>/dev/null | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("id", ""))
+except Exception: print("")' )" || true
+  if [[ -z "$project_id" ]]; then
+    echo "SKIP: could not resolve the GitLab project id for $path"
+    return 0
+  fi
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"content": open(sys.argv[1]).read(), "include_jobs": False}))' "$yml")"
+  if ! resp="$(curl -sS --max-time 60 -X POST --header "$header" --header "Content-Type: application/json" -d "$payload" "$api/projects/$project_id/ci/lint" 2>&1)"; then
+    echo "FAIL: GitLab CI lint request failed" >&2
+    return 1
+  fi
+  valid="$(printf '%s' "$resp" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("valid"))
+except Exception: print("parse-error")' )"
+  if [[ "$valid" == "True" ]]; then
+    echo "PASS: .gitlab-ci.yml passes GitLab lint"
+    return 0
+  fi
+  if [[ "$valid" != "False" ]]; then
+    # Auth rejected or a non-JSON body: degrade instead of blocking releases
+    # on an environment quirk the other checks cannot see.
+    echo "SKIP: GitLab CI lint response unusable with the available token"
+    return 0
+  fi
+  printf '%s' "$resp" | python3 -c 'import json,sys
+try:
+    for e in (json.load(sys.stdin).get("errors") or []): print("ERROR:", e)
+except Exception: pass' >&2
+  echo "FAIL: GitLab CI lint rejected .gitlab-ci.yml" >&2
+  return 1
+}
+
+
 check_release_guard() {
   local root_dir="${1:-.}"
   local tag_name="${2:-}"
@@ -466,6 +610,10 @@ check_release_guard() {
   if [[ "${MAGISK_RELEASE_REQUIRE_VERSIONCODE_INCREMENT:-true}" == true ]]; then check_versioncode_increment "$root_dir" || fail=1; fi
   if [[ "${MAGISK_RELEASE_REQUIRE_README_BADGES:-true}" == true ]]; then check_readme_badges "$root_dir" || fail=1; fi
   if [[ "${MAGISK_RELEASE_REQUIRE_TAG_MATCH:-true}" == true ]]; then check_tag_matches_version "$tag_name" "$VERSION_NAME" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_SUBMODULE_POINTERS:-true}" == true ]]; then check_submodule_pointers "$root_dir" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_TOOLKIT_PIN:-true}" == true ]]; then check_toolkit_pin "$root_dir" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_WRAPPER_SHA:-true}" == true ]]; then check_gradle_wrapper_sha "$root_dir" || fail=1; fi
+  if [[ "${MAGISK_RELEASE_REQUIRE_CI_LINT:-true}" == true ]]; then check_gitlab_ci_lint "$root_dir" || fail=1; fi
 
   # Play listing metadata is optional and declared per project in the policy.
   if [[ -n "${MAGISK_RELEASE_WHATSNEW_LOCALES:-}" ]]; then

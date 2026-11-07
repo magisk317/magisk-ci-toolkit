@@ -223,3 +223,86 @@ check_release_guard "$repo_fallback" v3.3.1 >/dev/null
 }
 
 echo "Release guard policy dispatch tests passed"
+# ---------------------------------------------------------------------------
+# 8. The gradle wrapper sha check: a pinned distribution with a checksum
+#    passes; the Renovate half-upgrade (URL moved, checksum behind) fails.
+# ---------------------------------------------------------------------------
+repo_wrap="$tmp_dir/repo-wrap"
+make_repo "$repo_wrap" "$(base_policy)"
+export MAGISK_RELEASE_POLICY_FILE="$repo_wrap/scripts/config/release-policy.json"
+mkdir -p "$repo_wrap/gradle/wrapper"
+printf "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.9.0-bin.zip\ndistributionSha256Sum=0b00b0ffe07c4d4789c12d4935a44a7057d55774b7540bd4a3f76f336deb177a\n" \
+  > "$repo_wrap/gradle/wrapper/gradle-wrapper.properties"
+out_wrap="$(check_gradle_wrapper_sha "$repo_wrap" 2>&1)"
+[[ "$out_wrap" == *"PASS: gradle wrapper 9.9.0 sha256 pinned"* ]] || {
+  echo "FAIL: wrapper sha pass expected: $out_wrap" >&2; exit 1
+}
+printf "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.9.0-bin.zip\n" \
+  > "$repo_wrap/gradle/wrapper/gradle-wrapper.properties"
+set +e
+out_wrap="$(check_gradle_wrapper_sha "$repo_wrap" 2>&1)"
+rc_wrap=$?
+set -e
+(( rc_wrap != 0 )) || { echo "FAIL: missing wrapper sha must fail" >&2; exit 1; }
+[[ "$out_wrap" == *"no distributionSha256Sum"* ]] || {
+  echo "FAIL: unexpected missing-sha output: $out_wrap" >&2; exit 1
+}
+printf "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.9.0-bin.zip\ndistributionSha256Sum=not-a-sha\n" \
+  > "$repo_wrap/gradle/wrapper/gradle-wrapper.properties"
+set +e
+out_wrap="$(check_gradle_wrapper_sha "$repo_wrap" 2>&1)"
+rc_wrap=$?
+set -e
+(( rc_wrap != 0 )) || { echo "FAIL: malformed wrapper sha must fail" >&2; exit 1; }
+[[ "$out_wrap" == *"not a sha256"* ]] || {
+  echo "FAIL: unexpected malformed-sha output: $out_wrap" >&2; exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 9. Repositories without the surface under check must SKIP, not fail: the
+#    guard is shared by repos in different shapes.
+# ---------------------------------------------------------------------------
+repo_plain="$tmp_dir/repo-plain"
+make_repo "$repo_plain" "$(base_policy)"
+out_plain="$(check_gradle_wrapper_sha "$repo_plain")"
+[[ "$out_plain" == *"SKIP: no gradle wrapper properties"* ]] || {
+  echo "FAIL: wrapper check should skip: $out_plain" >&2; exit 1
+}
+out_plain="$(check_gitlab_ci_lint "$repo_plain")"
+[[ "$out_plain" == *"SKIP: no .gitlab-ci.yml"* ]] || {
+  echo "FAIL: lint check should skip: $out_plain" >&2; exit 1
+}
+mkdir -p "$repo_plain/gradle/wrapper" "$repo_plain/.github"
+printf "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.9.0-bin.zip\ndistributionSha256Sum=0b00b0ffe07c4d4789c12d4935a44a7057d55774b7540bd4a3f76f336deb177a\n" \
+  > "$repo_plain/gradle/wrapper/gradle-wrapper.properties"
+printf "stages: [build]\n" > "$repo_plain/.gitlab-ci.yml"
+unset GITLAB_TOKEN CI_JOB_TOKEN
+out_plain="$(unset GITLAB_TOKEN CI_JOB_TOKEN; check_gitlab_ci_lint "$repo_plain")"
+[[ "$out_plain" == *"SKIP: GitLab CI lint needs"* ]] || {
+  echo "FAIL: lint without a token should skip: $out_plain" >&2; exit 1
+}
+out_plain="$(check_toolkit_pin "$repo_plain")"
+[[ "$out_plain" == *"SKIP: no toolkit pin surfaces"* ]] || {
+  echo "FAIL: toolkit pin should skip: $out_plain" >&2; exit 1
+}
+out_plain="$(check_submodule_pointers "$repo_plain")"
+[[ "$out_plain" == *"SKIP: no submodules"* ]] || {
+  echo "FAIL: pointer check should skip: $out_plain" >&2; exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 10. The kill switches honour the MAGISK_RELEASE_REQUIRE_* convention.
+# ---------------------------------------------------------------------------
+set +e
+off_out="$(MAGISK_RELEASE_REQUIRE_WRAPPER_SHA=false check_release_guard "$repo_wrap" v3.3.1 2>&1)"
+off_rc=$?
+on_out="$(check_release_guard "$repo_wrap" v3.3.1 2>&1)"
+on_rc=$?
+set -e
+(( off_rc == 0 )) || { echo "FAIL: kill switch must let the guard pass: $off_out" >&2; exit 1; }
+(( on_rc != 0 )) || { echo "FAIL: guard must fail on a stale wrapper sha" >&2; exit 1; }
+[[ "$on_out" == *"not a sha256"* ]] || {
+  echo "FAIL: unexpected guard output: $on_out" >&2; exit 1; }
+
+echo "Release guard new-check tests passed"
+
