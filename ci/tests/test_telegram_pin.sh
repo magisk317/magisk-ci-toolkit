@@ -217,7 +217,7 @@ extract_release_heredoc "$template" "$rel_script"
 bash -n "$rel_script"
 release_work="$tmp_dir/release-work"
 mkdir -p "$release_work/docs" "$release_work/artifacts"
-touch "$release_work/artifacts/XposedSmsCode_v3.3.1_arm64-v8a_release.apk"
+printf 'fake-apk-bytes' > "$release_work/artifacts/XposedSmsCode_v3.3.1_arm64-v8a_release.apk"
 cat > "$release_work/docs/CHANGELOG.md" <<'CL'
 # Changelog
 ## [v3.3.1] - 2026-07-26
@@ -226,7 +226,7 @@ CL
 : >"$capture"
 run_with_mock "$release_work" "$rel_script" \
   "CAPTURE_FILE=$capture" "TG_MOCK_BOT_ID=$TG_MOCK_BOT_ID" \
-  "TG_BOT_TOKEN=test" "TG_CHAT_ID=test" "MAGISK_TELEGRAM_PIN=latest" \
+  "TG_BOT_TOKEN=test" "TG_CHAT_ID=-1001234567890" "MAGISK_TELEGRAM_PIN=latest" \
   "MAGISK_TELEGRAM_PROJECT_NAME=Demo" "MAGISK_TELEGRAM_PROJECT_TAG=#Demo" \
   "CI_PROJECT_NAME=Demo" "CI_PROJECT_ID=99999" \
   "CI_API_V4_URL=https://gitlab.com/api/v4" "GITLAB_API_TOKEN=fake-token" \

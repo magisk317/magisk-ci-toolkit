@@ -197,9 +197,12 @@ assert_not_contains "$captured_seven" '--- CALL sendDocument ---' \
 rm -f "$tmp_dir/work/artifacts"/extra-*_arm64-v8a_debug.apk
 
 owner_rules="$(awk '
-  /^\.magisk_android_release_owner_rules:/ { capture = 1 }
+  /^\.magisk_android_release_owner_rules:/ { capture = 1; next }
+  # d635dc5 inserted further rule anchors (aab packaging, Play publish)
+  # between the owner rules and the guard anchor; stop at the first
+  # top-level anchor so only the owner rules block is asserted.
+  capture && /^\./ { exit }
   capture { print }
-  capture && /^\.magisk_android_release_guard:/ { exit }
 ' "$root_dir/.gitlab/ci/android-release.yml")"
 assert_not_contains "$owner_rules" 'when: manual' "GitLab release must run automatically"
 assert_not_contains "$owner_rules" 'allow_failure: true' "GitLab release must be blocking"
