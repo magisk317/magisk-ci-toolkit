@@ -137,7 +137,6 @@ for apk in "${apk_files[@]}"; do
   # package name into the platform codename (for example, "17").
   package_name="$(printf '%s\n' "$package_line" | sed -nE "s/^name='([^']+)'.*/\1/p")"
   version_code="$(printf '%s\n' "$package_line" | sed -nE "s/^name='[^']+' versionCode='([^']+)'.*/\1/p")"
-  version_name="$(printf '%s\n' "$package_line" | sed -nE "s/^name='[^']+' versionCode='[^']+' versionName='([^']*)'.*/\1/p")"
   if [[ -z "$package_name" || -z "$version_code" ]]; then
     echo "ERROR: APK package metadata is incomplete: $apk" >&2
     exit 1
