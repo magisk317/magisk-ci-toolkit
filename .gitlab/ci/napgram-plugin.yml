@@ -28,9 +28,9 @@ variables:
   BUN_INSTALL_CACHE_DIR: "$CI_PROJECT_DIR/.bun-cache"
   # The NapGram project that owns the @napgram/* npm registry.
   NAPGRAM_NPM_PROJECT: "84583729"
-  # The image the plugin jobs run on. Overridable so a python-capable Bun
-  # image can be adopted without touching every plugin repo again.
-  NAPGRAM_PLUGIN_BUN_IMAGE: "oven/bun:1.4.4-alpine"
+  # The image the plugin jobs run on: the self-hosted python-capable Bun
+  # image (multi-arch manifest baked by docker:build:* on main pushes).
+  NAPGRAM_PLUGIN_BUN_IMAGE: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/plugin-bun:1.4.4"
 
 .napgram_plugin_setup:
   before_script:
