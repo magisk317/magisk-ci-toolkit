@@ -63,6 +63,9 @@ napgram-plugin:typecheck:
     - bash scripts/check-esm-imports.sh
     - bun run validate
     - bun run type-check
+    # Repos that ship a test script (e.g. slave-market's vitest suite) get it
+    # run here; --if-present keeps repos without tests green.
+    - bun run --if-present test
 
 napgram-plugin:release:gitlab:
   stage: release
