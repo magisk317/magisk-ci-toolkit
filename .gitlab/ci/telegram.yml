@@ -51,7 +51,7 @@
     - when: never
 
 .magisk_telegram_ci:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.2"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.4"
   stage: notify
   variables:
     MAGISK_TELEGRAM_PROJECT_TAG: "#Project"
@@ -605,7 +605,7 @@
       MAGISK_TELEGRAM_CI_EOF
       bash /tmp/magisk_telegram_ci.sh
 .magisk_telegram_release:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.2"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.4"
   stage: release
   interruptible: false
   variables:
@@ -1385,7 +1385,7 @@
       bash /tmp/magisk_telegram_release.sh
 
 .magisk_telegram_images:
-  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.2"
+  image: "registry.gitlab.com/magisk3171/shared/magisk-ci-toolkit/utility:3.24.4"
   stage: notify
   allow_failure: true
   variables:
