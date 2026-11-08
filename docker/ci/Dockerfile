@@ -106,3 +106,18 @@ RUN apk add --no-cache \
     curl \
     git \
     jq
+
+# ---------------------------------------------------------------------------
+# plugin-bun: same Bun base as webui-bun plus python3 for the NapGram plugin
+# marketplace tooling (snippet/registry scripts that shell out to python).
+# Kept separate so the lightweight webui-bun target stays lean.
+# ---------------------------------------------------------------------------
+FROM oven/bun:${BUN_TAG} AS plugin-bun
+
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    python3

@@ -9,7 +9,7 @@
 #   - Tags follow the upstream base versions (see docker/ci/versions.env):
 #     utility → full Alpine release (e.g. 3.24.2) read from the built image,
 #     android-jdk → Temurin tag (27_35), zygisk-rust → Rust (1.99.1),
-#     webui-bun → Bun (1.4.4).
+#     webui-bun → Bun (1.4.4), plugin-bun → Bun (1.4.4).
 #   - Consumers must pin an immutable `<version>` tag (or digest); `latest`
 #     exists only as a convenience and MUST NOT be referenced from consumer
 #     pipelines.
@@ -28,7 +28,7 @@
     DOCKER_TLS_CERTDIR: ""
     DOCKER_DRIVER: overlay2
     BUILDKIT_PROGRESS: "plain"
-    MAGISK_CI_TARGETS: "utility android-jdk zygisk-rust webui-bun"
+    MAGISK_CI_TARGETS: "utility android-jdk zygisk-rust webui-bun plugin-bun"
   retry:
     max: 1
     when:
@@ -74,6 +74,9 @@
           webui-bun)
             docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'bun --version && git --version'
             ;;
+          plugin-bun)
+            docker run --rm --entrypoint sh "magisk-ci-tmp:${target}" -c 'bun --version && git --version && python3 --version'
+            ;;
         esac
         case "$target" in
           utility)
@@ -96,6 +99,10 @@
           webui-bun)
             docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/webui-bun:${MAGISK_CI_BUN_VERSION}-${MAGISK_CI_ARCH_TAG}"
             docker push "${MAGISK_CI_REGISTRY_IMAGE}/webui-bun:${MAGISK_CI_BUN_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            ;;
+          plugin-bun)
+            docker tag "magisk-ci-tmp:${target}" "${MAGISK_CI_REGISTRY_IMAGE}/plugin-bun:${MAGISK_CI_BUN_VERSION}-${MAGISK_CI_ARCH_TAG}"
+            docker push "${MAGISK_CI_REGISTRY_IMAGE}/plugin-bun:${MAGISK_CI_BUN_VERSION}-${MAGISK_CI_ARCH_TAG}"
             ;;
         esac
       done
@@ -144,7 +151,7 @@ docker:manifest:
   variables:
     DOCKER_HOST: "tcp://docker:2375"
     DOCKER_TLS_CERTDIR: ""
-    MAGISK_CI_TARGETS: "utility android-jdk zygisk-rust webui-bun"
+    MAGISK_CI_TARGETS: "utility android-jdk zygisk-rust webui-bun plugin-bun"
   needs:
     - job: docker:build:amd64
       artifacts: true
