@@ -1,0 +1,105 @@
+# Shared NapGram plugin CI. The four plugin repos (slave-market,
+# link-analysis, group-analysis, napgram-plugin-template) run identical
+# pipelines that differ only in MARKETPLACE_PACKAGE_NAME, so this template
+# owns the setup, check and release jobs; consumers include it and set the
+# package name. Consumers must keep scripts/gitlab_plugin_release.sh and
+# scripts/check-esm-imports.sh (they are per-repo copies kept in lockstep).
+#
+# - check stage: type-check + validate on main/dev and MRs (no tag).
+# - release stage: on version tags when RELEASE_OWNER=gitlab, pack the plugin
+#   tgz, build the marketplace snippet (GitLab URLs), publish a GitLab Release
+#   with the tgz on the generic package registry, and open a marketplace MR.
+#
+# GitHub release.yml continues to run as a mirror (RELEASE_OWNER unset there);
+# both pipelines produce the same tgz (identical sha256), but only the GitLab
+# snippet URL is upserted into marketplace/index.json.
+
+default:
+  tags:
+    # Architecture-agnostic Bun jobs — pinned to arm64.
+    - magisk-arm64-linux
+
+stages:
+  - check
+  - release
+
+variables:
+  GIT_DEPTH: "0"
+  BUN_INSTALL_CACHE_DIR: "$CI_PROJECT_DIR/.bun-cache"
+  # The NapGram project that owns the @napgram/* npm registry.
+  NAPGRAM_NPM_PROJECT: "84583729"
+  # The image the plugin jobs run on. Overridable so a python-capable Bun
+  # image can be adopted without touching every plugin repo again.
+  NAPGRAM_PLUGIN_BUN_IMAGE: "oven/bun:1.4.4-alpine"
+
+.napgram_plugin_setup:
+  before_script:
+    - apk add --no-cache bash git curl python3 ca-certificates
+    - |
+      REGISTRY="https://gitlab.com/api/v4/projects/${NAPGRAM_NPM_PROJECT}/packages/npm/"
+      echo "@napgram:registry=$REGISTRY" >> ~/.npmrc
+      echo "//gitlab.com/api/v4/projects/${NAPGRAM_NPM_PROJECT}/packages/npm/:_authToken=${CI_JOB_TOKEN}" >> ~/.npmrc
+      echo "always-auth=true" >> ~/.npmrc
+    - bun install --frozen-lockfile
+
+napgram-plugin:typecheck:
+  stage: check
+  image: "$NAPGRAM_PLUGIN_BUN_IMAGE"
+  extends: .napgram_plugin_setup
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|dev)$/'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  cache:
+    key:
+      files:
+        - bun.lock
+    paths:
+      - .bun-cache/
+  script:
+    - bash scripts/check-esm-imports.sh
+    - bun run validate
+    - bun run type-check
+
+napgram-plugin:release:gitlab:
+  stage: release
+  image: "$NAPGRAM_PLUGIN_BUN_IMAGE"
+  extends: .napgram_plugin_setup
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+[.][0-9]+[.][0-9]+.*$/ && $RELEASE_OWNER == "gitlab"'
+      when: on_success
+    - when: never
+  cache:
+    key:
+      files:
+        - bun.lock
+    paths:
+      - .bun-cache/
+  script:
+    - bun run build
+    - bun run validate
+    - bun run pack:tgz
+    - bun run --silent marketplace:snippet > marketplace-index-snippet.json
+    - MARKETPLACE_PACKAGE_NAME="$MARKETPLACE_PACKAGE_NAME" bash scripts/gitlab_plugin_release.sh
+    - |
+      if [ -n "${MARKETPLACE_MR_TOKEN:-}" ]; then
+        echo "Submitting marketplace MR..."
+        # Clone the marketplace repo, upsert the snippet, push a branch, open an MR.
+        git clone "https://oauth2:${MARKETPLACE_MR_TOKEN}@gitlab.com/magisk3171/napgram-ecosystem/marketplace.git" marketplace
+        bun scripts/marketplace-upsert.mjs --index marketplace/index.json --snippet marketplace-index-snippet.json
+        META_ID="$(bun -p "require('./napgram-plugin.json').id || require('./package.json').name")"
+        META_VER="$(bun -p "require('./package.json').version")"
+        BR="marketplace/${META_ID}-${META_VER}"
+        cd marketplace
+        git config user.email "ci@napgram.gitlab"
+        git config user.name "NapGram CI"
+        git checkout -b "$BR"
+        git add index.json
+        git commit -m "marketplace: update ${META_ID} ${META_VER}"
+        git push --push-option=merge_request.create --push-option=merge_request.target=main --push-option=merge_request.title="marketplace: update ${META_ID} ${META_VER}" origin "$BR"
+      else
+        echo "MARKETPLACE_MR_TOKEN unset; skipping marketplace MR."
+      fi
