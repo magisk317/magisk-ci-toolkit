@@ -83,7 +83,8 @@ def main():
         if not matched and config.get("unknown", "full") == "full":
             print("\n".join(config["full_tasks"]))
             return 0
-    print("\n".join(sorted(selected)))
+    if selected:
+        print("\n".join(sorted(selected)))
     return 0
 
 

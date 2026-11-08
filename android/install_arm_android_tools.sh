@@ -17,9 +17,18 @@ for tool in aidl aapt2; do
   found=0
   for build_tools_dir in "$sdk_root"/build-tools/*; do
     [[ -d "$build_tools_dir" ]] || continue
-    install -m 0755 "$source_tool" "$build_tools_dir/$tool"
+    # A previous job may already have installed this exact ARM binary here;
+    # coreutils on the ARM runner refuses a same-file install ("Already
+    # exists"), so treat that state as done instead of failing.
+    dest="$build_tools_dir/$tool"
+    if [ "$(stat -c %i "$source_tool")" = "$(stat -c %i "$dest")" ]; then
+      found=1
+      echo "Using ARM $tool (already installed): $dest"
+      continue
+    fi
+    install -m 0755 "$source_tool" "$dest"
     found=1
-    echo "Using ARM $tool: $build_tools_dir/$tool"
+    echo "Using ARM $tool: $dest"
   done
   if [[ "$found" -eq 0 ]]; then
     echo "ERROR: no Android build-tools installation exists under $sdk_root" >&2
