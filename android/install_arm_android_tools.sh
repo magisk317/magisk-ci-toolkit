@@ -8,7 +8,7 @@ if [[ -z "$sdk_root" || ! -d "$sdk_root/build-tools" ]]; then
 fi
 
 for tool in aidl aapt2; do
-  source_tool="/usr/local/bin/$tool"
+  source_tool="${MAGISK_ARM_TOOL_PREFIX:-/usr/local/bin}/$tool"
   if [[ ! -x "$source_tool" ]]; then
     echo "ERROR: ARM Android tool is unavailable: $source_tool" >&2
     exit 1
@@ -21,12 +21,12 @@ for tool in aidl aapt2; do
     # coreutils on the ARM runner refuses a same-file install ("Already
     # exists"), so treat that state as done instead of failing.
     dest="$build_tools_dir/$tool"
-    if [ "$(stat -c %i "$source_tool")" = "$(stat -c %i "$dest")" ]; then
+    if [[ -f "$dest" ]] && cmp -s "$source_tool" "$dest"; then
       found=1
       echo "Using ARM $tool (already installed): $dest"
       continue
     fi
-    install -m 0755 "$source_tool" "$dest"
+    install -m 0755 "$source_tool" "$dest" || cmp -s "$source_tool" "$dest"
     found=1
     echo "Using ARM $tool: $dest"
   done
