@@ -260,11 +260,23 @@ def main() -> int:
         rows, drift, failures = evaluate(repo, live)
 
     if args.mode == "pre-push" and FLEET_CHECKER.is_file():
+        # git push exports GIT_DIR (and friends) into the hook environment; the
+        # fleet checker runs `git -C <repo>` against every consumer working copy,
+        # and any inherited GIT_DIR would silently resolve ALL of those queries
+        # against the pushing repo instead (shared repos then see empty ls-trees
+        # and "fail" every consumer). Strip the GIT_* family so the checker
+        # rediscovers each repo from its own path.
+        checker_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        }
         done = subprocess.run(
             [sys.executable, str(FLEET_CHECKER)],
             capture_output=True,
             text=True,
             check=False,
+            env=checker_env,
         )
         if done.returncode != 0:
             failures.append("fleet checker (%s) exited %d:\n%s"
