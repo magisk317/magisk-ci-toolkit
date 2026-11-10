@@ -63,9 +63,12 @@ shell:test:
   # All utilities (bash, curl, jq, git, python3, openssl, shellcheck) are pre-baked
   # into .magisk_utility_base. No runtime apk add is required.
   script:
-    - bash -n ci/*.sh ci/tests/*.sh codegen/*.sh codegen/tests/*.sh gradle/*.sh gradle/tests/*.sh release/*.sh release/tests/*.sh
+    - bash ci/check_shell_syntax.sh ci/*.sh ci/tests/*.sh codegen/*.sh codegen/tests/*.sh gradle/*.sh gradle/tests/*.sh release/*.sh release/tests/*.sh
     - >-
       shellcheck -x
+      ci/check_shell_syntax.sh
+      ci/tests/test_check_shell_syntax.sh
+      ci/tests/test_verify_mirror_targets.sh
       ci/cancel_older_mr_pipelines.sh
       ci/cancel_older_renovate_pipelines.sh
       ci/cancel_merged_mr_pipelines.sh
@@ -110,6 +113,8 @@ shell:test:
       release/tests/test_release_tag.sh
       release/tests/test_check_release_guard.sh
       ci/tests/test_trusted_projects.sh
+    - bash ci/tests/test_check_shell_syntax.sh
+    - bash ci/tests/test_verify_mirror_targets.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh
     - bash ci/tests/test_cancel_older_renovate_pipelines.sh
     - bash ci/tests/test_cancel_merged_mr_pipelines.sh
