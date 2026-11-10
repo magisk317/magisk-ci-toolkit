@@ -16,6 +16,28 @@ Hosting ownership and a future GitLab-to-GitHub cutover are documented in
 
 ## Usage
 
+### Cross-repository twin files
+
+`ci/cross_repo_twin_files.py` checks the reviewed list of production filenames shared by
+XposedSmsCode and xinyi-relay. New names and stale baseline entries fail the gate. This
+is a naming review guard; passing does not establish shared behavior or implementation.
+
+```bash
+python3 ci/cross_repo_twin_files.py --repo-a /path/to/XposedSmsCode \
+  --repo-b /path/to/xinyi-relay --baseline ci/config/twin_files_baseline.json --report
+```
+
+Use `--json` for a machine-readable report, or `--min-similarity 0.99` to adjust the
+report's advisory threshold. The report includes all paths and declared packages for
+each name, with the highest text similarity among candidate pairs. Whitespace and the
+two application root namespaces are normalized for comparison; package and path drift
+are reported unchanged. Similarity neither changes the gate result nor proves semantic
+equivalence, including for string literals. Review behavior and contracts separately.
+The baseline must be explicitly reviewed before using `--update`.
+
+`bash ci/tests/test_cross_repo_twin_files.sh` exercises exclusions, baseline failures,
+report formats, namespace normalization, and invalid inputs, and runs in toolkit CI.
+
 ### GitHub Actions
 
 Keep a small resolver in the consumer repository and pin it to a full commit SHA. The resolver
