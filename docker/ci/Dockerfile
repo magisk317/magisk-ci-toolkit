@@ -18,7 +18,7 @@ ARG ALPINE_VERSION=3.24
 # first FROM — ARGs declared between stages are not in the global scope and
 # resolve to empty in FROM lines (BuildKit behaviour, verified empirically).
 ARG TEMURIN_TAG=27_35-jdk-resolute
-ARG RUST_TAG=1.99.1-trixie
+ARG RUST_TAG=1.100.0-trixie
 ARG BUN_TAG=1.4.4-alpine
 
 # ---------------------------------------------------------------------------
