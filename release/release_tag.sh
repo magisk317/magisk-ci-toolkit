@@ -526,19 +526,34 @@ run_webui_checks() {
   echo "WebUI checks passed."
 }
 
-# Optional: Run fastlane sync (xinyi-relay only)
+# Run project-specific metadata sync when present, otherwise use the shared
+# changelog synchronizer for policies that declare Fastlane locales.
 run_fastlane_sync() {
   local root_dir="$1"
   local sync_script="${root_dir}/scripts/release/sync_fastlane_metadata.sh"
+  local shared_sync_script
+  shared_sync_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sync_fastlane_changelogs.sh"
 
-  if [[ ! -f "$sync_script" ]]; then
-    echo "WARN: fastlane sync script not found: $sync_script"
-    return 0
+  if [[ -f "$sync_script" ]]; then
+    echo "Running project Fastlane metadata sync..."
+    bash "$sync_script"
+    echo "Project Fastlane metadata sync completed."
+  elif [[ -f "$root_dir/scripts/config/release-policy.json" ]] && \
+       python3 - "$root_dir/scripts/config/release-policy.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    policy = json.load(source)
+raise SystemExit(0 if policy.get("fastlane_locales") else 1)
+PY
+  then
+    echo "Running shared Fastlane changelog sync..."
+    bash "$shared_sync_script" --root "$root_dir"
+    echo "Shared Fastlane changelog sync completed."
+  else
+    echo "WARN: no Fastlane metadata sync is configured for $root_dir"
   fi
-
-  echo "Running fastlane metadata sync..."
-  bash "$sync_script"
-  echo "Fastlane metadata sync completed."
 }
 
 # If sourced directly (not from a wrapper), run with defaults
