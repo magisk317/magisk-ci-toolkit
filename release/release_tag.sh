@@ -526,31 +526,43 @@ run_webui_checks() {
   echo "WebUI checks passed."
 }
 
-# Run project-specific metadata sync when present, otherwise use the shared
-# changelog synchronizer for policies that declare Fastlane locales.
+# Verify generated Fastlane metadata before the release build. Write mode must
+# run before the final release commit so this check never changes the snapshotted HEAD.
 run_fastlane_sync() {
   local root_dir="$1"
   local sync_script="${root_dir}/scripts/release/sync_fastlane_metadata.sh"
   local shared_sync_script
+  local policy_file="${root_dir}/scripts/config/release-policy.json"
+  local has_fastlane_locales=false
   shared_sync_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sync_fastlane_changelogs.sh"
 
   if [[ -f "$sync_script" ]]; then
-    echo "Running project Fastlane metadata sync..."
-    bash "$sync_script"
-    echo "Project Fastlane metadata sync completed."
-  elif [[ -f "$root_dir/scripts/config/release-policy.json" ]] && \
-       python3 - "$root_dir/scripts/config/release-policy.json" <<'PY'
+    echo "Checking project Fastlane metadata..."
+    bash "$sync_script" --check
+    echo "Project Fastlane metadata check completed."
+  elif [[ -f "$policy_file" ]]; then
+    if ! has_fastlane_locales="$(python3 - "$policy_file" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as source:
     policy = json.load(source)
-raise SystemExit(0 if policy.get("fastlane_locales") else 1)
+locales = policy.get("fastlane_locales", [])
+if not isinstance(locales, list) or not all(isinstance(item, str) for item in locales):
+    raise SystemExit("fastlane_locales must be a list of strings")
+print("true" if locales else "false")
 PY
-  then
-    echo "Running shared Fastlane changelog sync..."
-    bash "$shared_sync_script" --root "$root_dir"
-    echo "Shared Fastlane changelog sync completed."
+    )"; then
+      echo "ERROR: cannot parse Fastlane locales from $policy_file" >&2
+      return 1
+    fi
+    if [[ "$has_fastlane_locales" == true ]]; then
+      echo "Checking shared Fastlane changelogs..."
+      bash "$shared_sync_script" --root "$root_dir" --check
+      echo "Shared Fastlane changelog check completed."
+    else
+      echo "WARN: no Fastlane locales are configured for $root_dir"
+    fi
   else
     echo "WARN: no Fastlane metadata sync is configured for $root_dir"
   fi

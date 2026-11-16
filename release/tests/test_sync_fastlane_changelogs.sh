@@ -28,6 +28,11 @@ script="$toolkit_root/release/sync_fastlane_changelogs.sh"
 [[ -x "$script" ]] || { echo "FAIL: helper is missing or not executable" >&2; exit 1; }
 
 bash "$script" --root "$repo"
+second_sync="$(bash "$script" --root "$repo")"
+[[ "$second_sync" == *"UNCHANGED: en-US changelog"* ]] || {
+  echo "FAIL: identical en-US changelog should not be rewritten" >&2
+  exit 1
+}
 cmp "$repo/distribution/whatsnew/whatsnew-en-US" \
   "$repo/fastlane/metadata/android/en-US/changelogs/57.txt"
 cmp "$repo/distribution/whatsnew/whatsnew-zh-CN" \
