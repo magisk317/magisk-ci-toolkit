@@ -58,16 +58,28 @@
       : "${MAGISK_ANDROID_SDK_PACKAGES:=platform-tools}"
       : "${MAGISK_CI_TOOLKIT_REF:?MAGISK_CI_TOOLKIT_REF must be a full 40-character toolkit SHA}"
       [[ "$MAGISK_CI_TOOLKIT_REF" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "MAGISK_CI_TOOLKIT_REF must be a full 40-character SHA" >&2; exit 1; }
-      # Google ships the Android CLI (android sdk ...) only for linux/x86_64;
-      # cmdline-tools >= 23 also makes sdkmanager a stub that execs the CLI.
-      # Standalone sdkmanager lives in the older cmdline-tools (19.0 here) and
-      # runs on every architecture, so non-x86_64 bootstraps use it directly.
+      # Front-end policy: prefer the standalone Android CLI (android sdk ...),
+      # which Google ships per architecture at
+      #   https://dl.google.com/android/cli/latest/<os>_<arch>/android
+      # so every supported runner (x86_64 and arm64) gets the same front-end.
+      # x86_64 still bootstraps via the full cmdline-tools zip, whose bundled
+      # android binary is the same CLI (>= 23 makes its sdkmanager a stub that
+      # execs it). The old standalone cmdline-tools (19.0, Java sdkmanager that
+      # runs on every architecture) is kept only as the last-resort fallback
+      # when no CLI can be bootstrapped at all.
       magisk_standalone_cmdline_tools="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
-      if [ "$(uname -m)" = "x86_64" ]; then
-        : "${MAGISK_ANDROID_COMMANDLINE_TOOLS_URL:=https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip}"
-      else
-        : "${MAGISK_ANDROID_COMMANDLINE_TOOLS_URL:=$magisk_standalone_cmdline_tools}"
-      fi
+      magisk_android_cli_base="https://dl.google.com/android/cli/latest"
+      case "$(uname -m)" in
+        x86_64)
+          : "${MAGISK_ANDROID_COMMANDLINE_TOOLS_URL:=https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip}"
+          ;;
+        aarch64|arm64)
+          : "${MAGISK_ANDROID_CLI_URL:=$magisk_android_cli_base/linux_arm64/android}"
+          ;;
+        *)
+          : "${MAGISK_ANDROID_COMMANDLINE_TOOLS_URL:=$magisk_standalone_cmdline_tools}"
+          ;;
+      esac
 
       export DEBIAN_FRONTEND=noninteractive
       use_mirror="${MAGISK_LINUX_USE_MIRROR:-true}"
@@ -126,12 +138,19 @@
         exec 9>"$ANDROID_HOME/cmdline-tools/.bootstrap.lock" 2>/dev/null || true
         flock 9 2>/dev/null || true
         if [ ! -x "$android_cli" ] && [ ! -x "$sdkmanager_cli" ]; then
-          tmp_dir="$(mktemp -d)"
-          curl -fsSL "$MAGISK_ANDROID_COMMANDLINE_TOOLS_URL" -o "$tmp_dir/cmdline-tools.zip"
-          unzip -q "$tmp_dir/cmdline-tools.zip" -d "$tmp_dir"
-          rm -rf "$ANDROID_HOME/cmdline-tools/latest"
-          mv "$tmp_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-          rm -rf "$tmp_dir"
+          if [ -n "${MAGISK_ANDROID_CLI_URL:-}" ]; then
+            # Per-architecture CLI binary (arm64): no cmdline-tools zip needed.
+            mkdir -p "$ANDROID_HOME/cmdline-tools/latest/bin"
+            curl -fsSL "$MAGISK_ANDROID_CLI_URL" -o "$android_cli"
+            chmod 0755 "$android_cli"
+          else
+            tmp_dir="$(mktemp -d)"
+            curl -fsSL "$MAGISK_ANDROID_COMMANDLINE_TOOLS_URL" -o "$tmp_dir/cmdline-tools.zip"
+            unzip -q "$tmp_dir/cmdline-tools.zip" -d "$tmp_dir"
+            rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+            mv "$tmp_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            rm -rf "$tmp_dir"
+          fi
         fi
         flock -u 9 2>/dev/null || true
       fi
@@ -240,12 +259,20 @@
           flock 9 2>/dev/null || true
           MAGISK_ANDROID_TOOL="$(magisk_pick_tool)"
           if [ "$MAGISK_ANDROID_TOOL" = none ]; then
-            tmp_dir="$(mktemp -d)"
-            curl -fsSL "$magisk_standalone_cmdline_tools" -o "$tmp_dir/cmdline-tools.zip"
-            unzip -q "$tmp_dir/cmdline-tools.zip" -d "$tmp_dir"
-            rm -rf "$ANDROID_HOME/cmdline-tools/latest"
-            mv "$tmp_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-            rm -rf "$tmp_dir"
+            # Last resort. Prefer the per-architecture CLI binary; the standalone
+            # cmdline-tools (Java sdkmanager) only applies where no CLI URL is set.
+            if [ -n "${MAGISK_ANDROID_CLI_URL:-}" ]; then
+              mkdir -p "$(dirname "$android_cli")"
+              curl -fsSL "$MAGISK_ANDROID_CLI_URL" -o "$android_cli"
+              chmod 0755 "$android_cli"
+            else
+              tmp_dir="$(mktemp -d)"
+              curl -fsSL "$magisk_standalone_cmdline_tools" -o "$tmp_dir/cmdline-tools.zip"
+              unzip -q "$tmp_dir/cmdline-tools.zip" -d "$tmp_dir"
+              rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+              mv "$tmp_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+              rm -rf "$tmp_dir"
+            fi
             MAGISK_ANDROID_TOOL="$(magisk_pick_tool)"
           fi
           flock -u 9 2>/dev/null || true
@@ -270,7 +297,10 @@
           echo "Installing SDK packages ($MAGISK_ANDROID_TOOL): $*"
           if [ "$MAGISK_ANDROID_TOOL" = cli ]; then
             cli_packages=()
-            for p in "$@"; do cli_packages+=("${p//;\//}"); done
+            # The CLI accepts sdkmanager's semicolon ids as-is, but pass its
+            # documented slash form (the old "${p//;\//}" here never actually
+            # replaced anything -- bash parses that replacement as pattern ";\").
+            for p in "$@"; do cli_packages+=("${p//;//}"); done
             "$android_cli" --sdk="$ANDROID_HOME" \
               sdk install "${cli_packages[@]}" "${install_args[@]+"${install_args[@]}"}"
           else
