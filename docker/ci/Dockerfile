@@ -19,7 +19,7 @@ ARG ALPINE_VERSION=3.24
 # resolve to empty in FROM lines (BuildKit behaviour, verified empirically).
 ARG TEMURIN_TAG=27_35-jdk-resolute
 ARG RUST_TAG=1.100.0-trixie
-ARG BUN_TAG=1.4.4-alpine
+ARG BUN_TAG=1.4.5-alpine
 
 # ---------------------------------------------------------------------------
 # utility: same toolset the legacy docker/utility/Dockerfile baked, now one
