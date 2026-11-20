@@ -50,6 +50,14 @@
 //   MAGISK_GRADLE_SOURCE           指定补种用的权威脚本路径（默认自动探测）
 //   MAGISK_GW_LOCK_HELD            =1 -> 上游已持有全局锁，此处跳过。写它的人有两个：gw，
 //                                      以及修复三之后持锁构建自己（经 Test 任务的 env 注入）。
+// 2026-11-20 新增（负载防呆，见 canonical/infra/debian-ci-runner-load.md 的 11-19/11-20 两次冻结实证）：
+//   MAGISK_DEBIAN_HEAVY_REPOS      大仓清单（逗号分隔，默认 "xinyi-relay"）；这些仓的
+//                                  冷启动全量打包（assemble/bundle/minify/lint + no-build-cache
+//                                  或 clean）在拿锁之前直接拒绝——本地门禁上限=compile+test+detekt，
+//                                  assemble/R8/minify 归 CI arm64 runner。
+//   MAGISK_DEBIAN_HEAVY_ALLOW      =1 -> 放行上面本来要拒绝的重任务组合（自担风险，如小仓例外）。
+//   MAGISK_DEBIAN_MIN_AVAILABLE_GB 内存余量预检阈值（默认 4.0；MemAvailable 低于它就不启动任何
+//                                  本地构建——残留 daemon 或本机 CI 正在编译的窗口）。=0 关闭预检。
 
 import java.lang.management.ManagementFactory
 import java.nio.channels.FileChannel
@@ -102,6 +110,64 @@ try {
     }
 } catch (Throwable seedError) {
     guardLog "补种到发行版失败（不影响构建，可用 gradle-lock-sync 手动撒）: ${seedError}"
+}
+
+// ---------- 内存余量预检 + 大仓重任务防呆（2026-11-20） ----------
+// 背景与配方：canonical/infra/debian-ci-runner-load.md（11-19 与 11-20 两次冻结，cgroup ≈11.36G）。
+// 本地门禁上限=compile+test+detekt；assemble/R8/minify 对大仓是绝对禁令，归 CI arm64 runner。
+// 这一节在拿锁之前就 fail fast：不排队、不占 gw 主锁、不与 CI 抢内存。对 CI job（GITLAB_CI=1，
+// 含 debian amd64 slot）整体豁免——CI 的负载由 runner 槽位与 MAGISK_GRADLE_BUILD_SLOTS 管。
+// 预检逻辑本身出错时降级为提醒，绝不成为构建失败的原因。
+try {
+    if (System.getenv("GITLAB_CI") == null && System.getenv("MAGISK_GW_LOCK_HELD") != "1") {
+        // (a) 大仓重任务防呆：仓名只有在 settingsEvaluated 之后才可靠——init 求值期
+        //     projectDir 为 null，daemon 的 cwd 又是发行版目录（与加锁节同名教训）。
+        //     挂在 settingsEvaluated 仍在配置期，先于任何执行期的内存大头。
+        def heavyRepos = (System.getenv("MAGISK_DEBIAN_HEAVY_REPOS") ?: "xinyi-relay").split(",").collect { it.trim() }
+        gradle.settingsEvaluated { settings ->
+            def guardRepo = settings.rootDir.toPath().fileName.toString()
+            def taskNameList = gradle.startParameter.taskNames.collect { it.toLowerCase() }
+            def heavyTask = taskNameList.any {
+                it.contains("assemble") || it.contains("bundle") || it.contains("minify") || it.contains("lint")
+            }
+            def coldStart = !gradle.startParameter.buildCacheEnabled ||
+                    taskNameList.any { it.startsWith("clean") || it.contains(" clean") }
+            if (heavyTask && coldStart && heavyRepos.contains(guardRepo) &&
+                    System.getenv("MAGISK_DEBIAN_HEAVY_ALLOW") != "1") {
+                throw new org.gradle.api.GradleException(
+                    "[build-guard] 拒绝：" + guardRepo + " 的冷启动全量打包（assemble/bundle/minify/lint + " +
+                    "no-build-cache/clean）会打满 cgroup——2026-11-19 与 11-20 两次实证冻结。本地门禁上限=" +
+                    "compile+test+detekt；assemble/R8/minify 归 CI arm64 runner。确要本地跑：" +
+                    "MAGISK_DEBIAN_HEAVY_ALLOW=1（自担风险）；大仓清单可用 MAGISK_DEBIAN_HEAVY_REPOS 覆盖。" +
+                    "参考 canonical/infra/debian-ci-runner-load.md。")
+            }
+            if (heavyTask && coldStart && !heavyRepos.contains(guardRepo)) {
+                guardLog "提醒：" + guardRepo + " 冷启动全量打包属高负载操作，大仓（" + heavyRepos.join(",") +
+                    "）会直接被拒；若机器随后冻结，见 canonical/infra/debian-ci-runner-load.md。"
+            }
+        }
+
+        // (b) 内存余量预检：MemAvailable 低于阈值时不启动任何本地构建
+        //     （残留 Kotlin/Gradle daemon，或本机 CI runner 正在编译的窗口）。
+        def minAvailEnv = System.getenv("MAGISK_DEBIAN_MIN_AVAILABLE_GB")
+        double minAvailGb = (minAvailEnv != null && (minAvailEnv.trim() =~ /^\d+(\.\d+)?$/).matches())
+                ? Double.parseDouble(minAvailEnv.trim()) : 4.0d
+        def memMatcher = new File("/proc/meminfo").text =~ /MemAvailable:\s+(\d+)\s+kB/
+        if (memMatcher.find()) {
+            double availGb = Long.parseLong(memMatcher.group(1)) / (1024.0d * 1024.0d)
+            if (availGb < minAvailGb) {
+                throw new org.gradle.api.GradleException(String.format(
+                    "[build-guard] 拒绝：内存余量 %.1fG 低于 %.1fG——残留 daemon 或本机 CI 正在编译。" +
+                    "先清 Kotlin/Gradle daemon（pkill -f KotlinCompileDaemon / gradle-lock-reset）或等 CI 完；" +
+                    "应急逃生 MAGISK_DEBIAN_MIN_AVAILABLE_GB=0。", availGb, minAvailGb))
+            }
+            guardLog String.format("内存余量预检通过：%.1fG 可用（阈值 %.1fG）。", availGb, minAvailGb)
+        }
+    }
+} catch (org.gradle.api.GradleException deny) {
+    throw deny
+} catch (Throwable preflightError) {
+    guardLog "内存/重任务预检异常（不影响构建）: ${preflightError}"
 }
 
 // ---------- 加锁 ----------
