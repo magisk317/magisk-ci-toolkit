@@ -39,24 +39,30 @@ check_version_extraction() {
   fi
 }
 
-# Check for non-ASCII commit subjects in the pending release range.
-check_commit_subjects() {
+# Check for non-ASCII commit subjects and bodies in the pending release range.
+# Subject and body report separately, each with its own policy switch: the 3.6a
+# rule keeps commit text ASCII in full, not just the first line. Body bytes are
+# checked with PCRE so tab-aligned bodies are not false positives.
+check_commit_messages() {
   local root_dir="$1"
-  local allow_non_ascii="${2:-false}"
+  local allow_non_ascii_subject="${2:-false}"
+  local allow_non_ascii_body="${3:-false}"
   local commit_range=""
   local range_source=""
   local base_ref=""
   local base_tag=""
   local upstream=""
   local checked=0
-  local has_non_ascii=0
   local row=""
   local sha=""
+  local message=""
   local subject=""
-  local offenders=()
+  local body=""
+  local subject_offenders=()
+  local body_offenders=()
 
-  if [[ "$allow_non_ascii" == "true" ]]; then
-    echo "PASS: commit subject ASCII guard disabled by ALLOW_NON_ASCII_COMMIT_SUBJECT=true"
+  if [[ "$allow_non_ascii_subject" == "true" && "$allow_non_ascii_body" == "true" ]]; then
+    echo "PASS: commit message ASCII guard disabled by ALLOW_NON_ASCII_COMMIT_SUBJECT/BODY=true"
     return 0
   fi
 
@@ -96,32 +102,48 @@ check_commit_subjects() {
     fi
   fi
 
-  while IFS=$'\t' read -r sha subject; do
-    [[ -z "$sha" ]] && continue
+  while IFS= read -r -d '' record; do
+    sha="${record%%$'\x02'*}"
+    message="${record#*$'\x02'}"
+    [[ -z "$sha" || -z "$message" ]] && continue
     checked=$((checked + 1))
-    if printf '%s' "$subject" | LC_ALL=C grep -q '[^ -~]'; then
-      has_non_ascii=1
-      offenders+=("$sha|$subject")
+    subject="$(printf '%s' "$message" | head -n 1)"
+    body="$(printf '%s' "$message" | tail -n +2)"
+    if [[ "$allow_non_ascii_subject" != "true" ]] && printf '%s' "$subject" | LC_ALL=C grep -q '[^ -~]'; then
+      subject_offenders+=("$sha|$subject")
     fi
-  done < <(git -C "$root_dir" log --no-merges --pretty=tformat:'%h%x09%s' "$commit_range")
+    if [[ "$allow_non_ascii_body" != "true" ]] && printf '%s' "$body" | LC_ALL=C grep -qP '[^\x20-\x7e\t]'; then
+      body_offenders+=("$sha")
+    fi
+  done < <(git -C "$root_dir" log --no-merges -z --pretty=tformat:'%h%x02%B' "$commit_range")
 
   if (( checked == 0 )); then
-    echo "PASS: commit subject check skipped (no commits in range: $commit_range; source: $range_source)"
+    echo "PASS: commit message check skipped (no commits in range: $commit_range; source: $range_source)"
     return 0
   fi
 
-  if (( has_non_ascii == 0 )); then
+  local rc=0
+  if (( ${#subject_offenders[@]} == 0 )); then
     echo "PASS: commit subjects are ASCII-only ($checked commits, range: $commit_range; source: $range_source)"
-    return 0
+  else
+    echo "FAIL: non-ASCII commit subject detected (range: $commit_range; source: $range_source)"
+    for row in "${subject_offenders[@]}"; do
+      sha="${row%%|*}"
+      subject="${row#*|}"
+      echo " - $sha $subject"
+    done
+    rc=1
   fi
-
-  echo "FAIL: non-ASCII commit subject detected (range: $commit_range; source: $range_source)"
-  for row in "${offenders[@]}"; do
-    sha="${row%%|*}"
-    subject="${row#*|}"
-    echo " - $sha $subject"
-  done
-  return 1
+  if (( ${#body_offenders[@]} == 0 )); then
+    echo "PASS: commit bodies are ASCII-only ($checked commits, range: $commit_range; source: $range_source)"
+  else
+    echo "FAIL: non-ASCII commit body detected (range: $commit_range; source: $range_source)"
+    for sha in "${body_offenders[@]}"; do
+      echo " - $sha (non-ASCII content in body)"
+    done
+    rc=1
+  fi
+  return $rc
 }
 
 # Check CHANGELOG section exists
@@ -358,6 +380,8 @@ for key in ("require_changelog", "require_versioncode_increment", "require_readm
     print("MAGISK_RELEASE_" + key.upper() + "=" + shlex.quote(str(data[key]).lower()))
 if isinstance(data.get("allow_non_ascii_commit_subject"), bool):
     print("MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT=" + shlex.quote(str(data["allow_non_ascii_commit_subject"]).lower()))
+if isinstance(data.get("allow_non_ascii_commit_body"), bool):
+    print("MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_BODY=" + shlex.quote(str(data["allow_non_ascii_commit_body"]).lower()))
 if isinstance(data.get("whatsnew_locales"), list):
     print("MAGISK_RELEASE_WHATSNEW_LOCALES=" + shlex.quote(" ".join(map(str, data["whatsnew_locales"]))))
 if isinstance(data.get("fastlane_locales"), list):
@@ -377,6 +401,7 @@ PY
   # earlier policy in the same shell would survive into this one and the
   # policy file would stop being the sole source of truth.
   unset MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT \
+    MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_BODY \
     MAGISK_RELEASE_WHATSNEW_LOCALES \
     MAGISK_RELEASE_WHATSNEW_DIRECTORY \
     MAGISK_RELEASE_WHATSNEW_MAX_LENGTH \
@@ -608,6 +633,7 @@ check_release_guard() {
   # The policy value wins when present; the env var only supplies the fallback
   # for policies that omit the key.
   local allow_non_ascii="${MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT:-${ALLOW_NON_ASCII_COMMIT_SUBJECT:-false}}"
+  local allow_non_ascii_body="${MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_BODY:-${ALLOW_NON_ASCII_COMMIT_BODY:-false}}"
 
   echo "Release guard"
 
@@ -615,7 +641,7 @@ check_release_guard() {
   export VERSION_NAME=""
 
   check_version_extraction "$root_dir" || fail=1
-  check_commit_subjects "$root_dir" "$allow_non_ascii" || fail=1
+  check_commit_messages "$root_dir" "$allow_non_ascii" "$allow_non_ascii_body" || fail=1
   if [[ "${MAGISK_RELEASE_REQUIRE_CHANGELOG:-true}" == true ]]; then check_changelog_section "$root_dir" "$VERSION_NAME" || fail=1; fi
   if [[ "${MAGISK_RELEASE_REQUIRE_VERSIONCODE_INCREMENT:-true}" == true ]]; then check_versioncode_increment "$root_dir" || fail=1; fi
   if [[ "${MAGISK_RELEASE_REQUIRE_README_BADGES:-true}" == true ]]; then check_readme_badges "$root_dir" || fail=1; fi

@@ -12,6 +12,7 @@ state_dir="$tmp_dir/state"
 mkdir -p "$state_dir"
 badge_calls_file="$state_dir/badge-calls"
 allow_non_ascii_file="$state_dir/allow-non-ascii"
+allow_non_ascii_body_file="$state_dir/allow-non-ascii-body"
 printf '0\n' > "$badge_calls_file"
 
 # The guard is driven through $(...) in the tests, so every observation a stub
@@ -21,8 +22,13 @@ check_readme_badges() {
   return 0
 }
 
-check_commit_subjects() {
+# Back up the real implementation BEFORE the stub below shadows it: case 7b
+# restores it with `source` to exercise the actual subject/body semantics.
+declare -f check_commit_messages > "$state_dir/real-commit-messages.sh"
+
+check_commit_messages() {
   printf '%s\n' "$2" > "$allow_non_ascii_file"
+  printf '%s\n' "${3:-}" > "$allow_non_ascii_body_file"
   return 0
 }
 
@@ -205,6 +211,9 @@ check_release_guard "$repo_ascii" v3.3.1 >/dev/null
 [[ "$(cat "$allow_non_ascii_file")" == "true" ]] || {
   echo "FAIL: policy allow_non_ascii_commit_subject was not honoured (got '$(cat "$allow_non_ascii_file")')" >&2; exit 1
 }
+[[ "$(cat "$allow_non_ascii_body_file")" == "false" ]] || {
+  echo "FAIL: subject-only policy must pass the independent body default (got '$(cat "$allow_non_ascii_body_file")')" >&2; exit 1
+}
 
 # An env var still decides the fallback for policies that omit the key.
 repo_fallback="$tmp_dir/repo-fallback"
@@ -222,7 +231,70 @@ check_release_guard "$repo_fallback" v3.3.1 >/dev/null
   echo "FAIL: default should be false (got '$(cat "$allow_non_ascii_file")')" >&2; exit 1
 }
 
+# The body switch dispatches the same way.
+repo_body_policy="$tmp_dir/repo-body-policy"
+make_repo "$repo_body_policy" "$(policy_with '
+import json,sys
+d=json.load(sys.stdin); d["allow_non_ascii_commit_body"]=True; print(json.dumps(d))')"
+export MAGISK_RELEASE_POLICY_FILE="$repo_body_policy/scripts/config/release-policy.json"
+
+check_release_guard "$repo_body_policy" v3.3.1 >/dev/null
+[[ "$(cat "$allow_non_ascii_body_file")" == "true" ]] || {
+  echo "FAIL: policy allow_non_ascii_commit_body was not honoured (got '$(cat "$allow_non_ascii_body_file")')" >&2; exit 1
+}
+unset MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_SUBJECT MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_BODY
+
 echo "Release guard policy dispatch tests passed"
+
+# ---------------------------------------------------------------------------
+# 7b. check_commit_messages semantics on real repos (real implementation
+#     restored from backup): subject and body report separately, each switch
+#     silences only its own check, and tab-aligned ASCII bodies are not false
+#     positives.
+# ---------------------------------------------------------------------------
+source "$state_dir/real-commit-messages.sh"
+
+repo_subj="$tmp_dir/repo-subj"
+git init -q "$repo_subj"
+git -C "$repo_subj" -c user.name=t -c user.email=t@example.com commit --allow-empty -q -m "中文 subject"
+set +e
+out_subj="$(MAGISK_RELEASE_COMMIT_RANGE=HEAD check_commit_messages "$repo_subj" false false 2>&1)"
+rc_subj=$?
+set -e
+(( rc_subj != 0 )) || { echo "FAIL: non-ASCII subject must fail: $out_subj" >&2; exit 1; }
+[[ "$out_subj" == *"non-ASCII commit subject"* ]] || { echo "FAIL: subject offender not reported: $out_subj" >&2; exit 1; }
+[[ "$out_subj" != *"non-ASCII commit body"* ]] || { echo "FAIL: ascii body must not be flagged: $out_subj" >&2; exit 1; }
+
+repo_body="$tmp_dir/repo-body"
+git init -q "$repo_body"
+git -C "$repo_body" -c user.name=t -c user.email=t@example.com commit --allow-empty -q -m "ascii subject" -m "中文 body"
+set +e
+out_body="$(MAGISK_RELEASE_COMMIT_RANGE=HEAD check_commit_messages "$repo_body" false false 2>&1)"
+rc_body=$?
+set -e
+(( rc_body != 0 )) || { echo "FAIL: non-ASCII body must fail: $out_body" >&2; exit 1; }
+[[ "$out_body" == *"non-ASCII commit body"* ]] || { echo "FAIL: body offender not reported: $out_body" >&2; exit 1; }
+[[ "$out_body" != *"non-ASCII commit subject"* ]] || { echo "FAIL: ascii subject must not be flagged: $out_body" >&2; exit 1; }
+out_body_ok="$(MAGISK_RELEASE_COMMIT_RANGE=HEAD MAGISK_RELEASE_ALLOW_NON_ASCII_COMMIT_BODY=true check_commit_messages "$repo_body" false true 2>&1)"
+rc_body_ok=$?
+(( rc_body_ok == 0 )) || { echo "FAIL: body switch must silence the body check: $out_body_ok" >&2; exit 1; }
+
+repo_tab="$tmp_dir/repo-tab"
+git init -q "$repo_tab"
+printf 'ascii subject\n\nbody col1\tcol2\n' > "$repo_tab/msg"
+git -C "$repo_tab" -c user.name=t -c user.email=t@example.com commit --allow-empty -q -F "$repo_tab/msg"
+out_tab="$(MAGISK_RELEASE_COMMIT_RANGE=HEAD check_commit_messages "$repo_tab" false false 2>&1)"
+rc_tab=$?
+(( rc_tab == 0 )) || { echo "FAIL: tab-aligned ascii body must pass: $out_tab" >&2; exit 1; }
+[[ "$out_tab" == *"PASS: commit bodies are ASCII-only"* ]] || { echo "FAIL: tab body pass output: $out_tab" >&2; exit 1; }
+unset MAGISK_RELEASE_COMMIT_RANGE
+
+# Restore the stub for any later case that relies on it.
+check_commit_messages() {
+  printf '%s\n' "$2" > "$allow_non_ascii_file"
+  printf '%s\n' "${3:-}" > "$allow_non_ascii_body_file"
+  return 0
+}
 # ---------------------------------------------------------------------------
 # 8. The gradle wrapper sha check: a pinned distribution with a checksum
 #    passes; the Renovate half-upgrade (URL moved, checksum behind) fails.
