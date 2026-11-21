@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Enforce ASCII-only commit messages (subject AND body) across /root/play checkouts.
+#
+# Rationale: canonical tooling/agent-working-rules.md section 3.6a - every commit
+# subject and body is ASCII-only English; explanations stay in conversation, not
+# in commits. Machine-level enforcement lives here so it applies to every IDE and
+# agent operating in these repos, independent of agent discipline. The release
+# guard (check_release_guard.sh) validates subject ASCII again at tag time.
+#
+# Exemptions (git-generated text, not authored by humans - upstream history
+# carries non-ASCII subjects that revert/fixup messages quote verbatim):
+#   - messages starting with "Merge ", "Revert ", "fixup! ", "squash! "
+#
+# Empty messages and unparsable files pass; this hook is a hard gate for
+# authored text only.
+set -uo pipefail
+
+file="${1:-}"
+[ -n "$file" ] || exit 0
+[ -r "$file" ] || exit 0
+
+first_line="$(head -n 1 "$file")"
+case "$first_line" in
+  "Merge "*|"Merge branch"*|"Merge remote-tracking"*|"Revert "*|"fixup! "*|"squash! "*|"On branch "*)
+    exit 0
+    ;;
+esac
+
+# git may or may not have stripped comment lines before this hook; drop them and
+# the scissor line so guidance text never trips the byte check.
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+grep -vE '^(#|---------------- >8 ---)' "$file" > "$tmp" 2>/dev/null || cp "$file" "$tmp"
+
+if LC_ALL=C grep -qP '[^\x20-\x7e\t]' "$tmp"; then
+  {
+    echo "commit-msg: non-ASCII character(s) in commit message."
+    echo "Rule: commit subject and body are ASCII-only English (tooling/agent-working-rules.md 3.6a);"
+    echo "Chinese explanations belong in the conversation, not in commits."
+    echo "Offending lines (byte offsets per line):"
+    LC_ALL=C grep -nP '[^\x20-\x7e\t]' "$tmp" | head -3 | cut -c1-120 | sed 's/^/  /'
+  } >&2
+  exit 1
+fi
+
+exit 0
