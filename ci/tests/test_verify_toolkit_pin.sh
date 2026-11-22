@@ -188,4 +188,22 @@ if ! output="$(MAGISK_CI_TOOLKIT_REF="$upper_ref" bash "$guard" --root "$upper" 
   exit 1
 fi
 
+hook_consumer="$tmp_dir/hook-consumer"
+build_consumer "$hook_consumer"
+git -C "$hook_consumer" init --quiet
+hook="$root_dir/ci/git_hooks/verify_consumer_toolkit_pin.sh"
+[[ -x "$hook" ]] || fail "consumer toolkit hook is missing or not executable"
+if ! output="$(MAGISK_TOOLKIT_PIN_GUARD="$guard" bash "$hook" "$hook_consumer" 2>&1)"; then
+  printf 'FAIL: clean consumer was rejected by the hook:\n%s\n' "$output" >&2
+  exit 1
+fi
+sed -i "s/$sha_pinned/$sha_other/g" "$hook_consumer/scripts/resolve_ci_toolkit.sh"
+status=0
+output="$(MAGISK_TOOLKIT_PIN_GUARD="$guard" bash "$hook" "$hook_consumer" 2>&1)" || status=$?
+(( status != 0 )) || fail "the consumer hook accepted resolver fallback drift"
+printf '%s\n' "$output" | grep -qF 'resolver fallback differs' || {
+  printf 'FAIL: hook rejected resolver drift for the wrong reason:\n%s\n' "$output" >&2
+  exit 1
+}
+
 printf 'ok: verify_toolkit_pin covers the GitLab includes, every GitHub toolkit ref and settings-level overrides\n'

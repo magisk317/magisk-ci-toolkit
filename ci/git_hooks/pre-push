@@ -5,6 +5,11 @@ set -uo pipefail
 REMOTE="${1:-origin}"
 REFS="$(cat || true)"
 [ -n "$REFS" ] || exit 0
+REPO="$(git rev-parse --show-toplevel)"
+TOOLKIT_PIN_GATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify_consumer_toolkit_pin.sh"
+if [ -f "$TOOLKIT_PIN_GATE" ]; then
+  bash "$TOOLKIT_PIN_GATE" "$REPO" || exit 1
+fi
 GATE="${MAGISK_POINTER_GATE:-}"
 if [ -z "$GATE" ]; then
   for candidate in \
@@ -14,7 +19,6 @@ if [ -z "$GATE" ]; then
   done
 fi
 [ -n "$GATE" ] || { echo "pointer gate not found; refusing to push blind" >&2; exit 1; }
-REPO="$(git rev-parse --show-toplevel)"
 echo "== pre-push $REMOTE $(printf '%s' "$REFS" | tr '\n' ' ')"
 python3 "$GATE" --mode pre-push --repo "$REPO" || exit 1
 exit 0

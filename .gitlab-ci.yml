@@ -63,7 +63,7 @@ shell:test:
   # All utilities (bash, curl, jq, git, python3, openssl, shellcheck) are pre-baked
   # into .magisk_utility_base. No runtime apk add is required.
   script:
-    - bash ci/check_shell_syntax.sh ci/*.sh ci/tests/*.sh codegen/*.sh codegen/tests/*.sh gradle/*.sh gradle/tests/*.sh release/*.sh release/tests/*.sh
+    - bash ci/check_shell_syntax.sh ci/*.sh ci/git_hooks/*.sh ci/tests/*.sh codegen/*.sh codegen/tests/*.sh gradle/*.sh gradle/tests/*.sh release/*.sh release/tests/*.sh
     - >-
       shellcheck -x
       ci/check_shell_syntax.sh
@@ -99,6 +99,7 @@ shell:test:
       ci/tests/test_resolve_git_checkout.sh
       ci/tests/test_cross_repo_twin_files.sh
       ci/verify_toolkit_pin.sh
+      ci/git_hooks/verify_consumer_toolkit_pin.sh
       ci/tests/test_verify_toolkit_pin.sh
       ci/tests/test_github_release_template.sh
       gradle/tests/test_run_gradle_with_retry.sh

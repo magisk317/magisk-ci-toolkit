@@ -44,6 +44,10 @@ for role in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
   fi
 done
 
+toolkit_pin_gate="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify_consumer_toolkit_pin.sh"
+if [ -f "$toolkit_pin_gate" ]; then
+  bash "$toolkit_pin_gate" "$repo"
+fi
 
 pointer_gate="${MAGISK_POINTER_GATE:-/root/play/magisk-ci-toolkit/ci/git_hooks/pointer_gate.py}"
 if [ -f "$pointer_gate" ]; then
