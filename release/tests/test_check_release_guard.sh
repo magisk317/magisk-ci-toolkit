@@ -252,6 +252,9 @@ echo "Release guard policy dispatch tests passed"
 #     silences only its own check, and tab-aligned ASCII bodies are not false
 #     positives.
 # ---------------------------------------------------------------------------
+# real-commit-messages.sh is generated into the mktemp state dir at runtime, so
+# static analysis cannot follow it.
+# shellcheck disable=SC1091
 source "$state_dir/real-commit-messages.sh"
 
 repo_subj="$tmp_dir/repo-subj"
