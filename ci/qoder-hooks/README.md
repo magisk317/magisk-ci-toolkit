@@ -1,16 +1,20 @@
-# Qoder-side hooks (distributable)
+# Qoder-side and CodeBuddy-side hooks (distributable)
 
-These are PreToolUse hooks for the **Qoder desktop app** (any machine). They are
-kept here so every machine installs the same version; they are NOT wired by
-`install.sh` (that script wires git hooks via `core.hooksPath`).
+These are PreToolUse hooks for the **Qoder desktop app** and **CodeBuddy Code**
+(any machine). They are kept here so every machine installs the same version;
+they are NOT wired by `install.sh` (that script wires git hooks via
+`core.hooksPath`).
 
 ## remote-payload-gate.py
 
 Refuses Bash commands that cross a remote-shell boundary (ssh, docker run/exec,
 adb shell) while carrying a fragile payload: heredocs, `\xNN` hex escapes,
-quotes nested inside `su -c`, and `$` expansions inside double quotes. Those
-shapes get eaten by one of the shell layers in the chain; the prescribed fix is
-write-locally -> scp -> execute remotely.
+command substitution of any quote style (`$(...)` and backticks -- the recurring
+class, which is how commit messages and scripts kept getting smuggled into
+remote command lines), quotes nested inside `su -c`, and `$` expansions inside
+double quotes. Those shapes get eaten by one of the shell layers in the chain;
+the prescribed fix is write-locally -> scp -> execute remotely (commits use
+`git commit -F <scp'd file>`).
 
 Install on a machine:
 
