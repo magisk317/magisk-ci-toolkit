@@ -34,7 +34,49 @@ second entry in `hooks.PreToolUse`:
 ```
 
 Escape hatches: `# gate:allow` in the command, or `QODER_REMOTE_PAYLOAD_GATE=off`
-in the environment. The hook is Qoder-specific (it reads Qoder's hook payload),
-which is why it lives here instead of in `ci/git_hooks`.
+in the environment. The checker reads the Claude-style hook payload
+(`tool_input.command`); a missing `tool_name` is treated as Bash so hosts that
+send only the command still get gated.
 
-Deployed: hp (2026-11-23), mbp (2026-11-23).
+## CodeBuddy
+
+CodeBuddy Code (v1.16.0+) uses the same PreToolUse protocol with user-level
+config at `~/.codebuddy/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"<abs-path>/.codebuddy/hooks/remote-payload-gate.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+CodeBuddy requires external settings edits to be approved in its `/hooks` panel
+before they take effect. Use an absolute python3 path: the hook environment is
+not a login shell.
+
+## Coverage matrix (2026-11-23)
+
+| IDE | Pre-exec interception | Deployed |
+|---|---|---|
+| Qoder (hp, mbp) | PreToolUse hook | yes |
+| CodeBuddy (mbp) | PreToolUse hook (`~/.codebuddy/settings.json`) | yes |
+| Trae CN | none - Trae has no PreToolUse support; AGENTS.md rules are its always-on layer | rules only |
+| ZCode | none found - per-session generated shell startups, no editable policy | rules only |
+| WorkBuddy | none found - `~/.workbuddy/settings.json` has no hooks key | rules only |
+
+For the "rules only" IDEs the enforcement that still applies everywhere is the
+git-layer fleet gate (warning whitelist, pointer gates) plus the canonical
+rules in `~/.ai-memory/canonical/tooling/agent-working-rules.md`, which every
+AGENTS.md chain reaches.
+
