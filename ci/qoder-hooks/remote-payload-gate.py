@@ -2,8 +2,9 @@
 """PreToolUse gate: keep fragile payloads off remote-shell boundaries.
 
 Every time a command crosses a remote shell boundary (ssh, docker run/exec
-sh -c, adb shell su -c) while carrying nested quotes, escapes, expansions or
-a heredoc, some layer of the chain eats part of it. Measured on this fleet:
+sh -c, adb shell su -c) while carrying nested quotes, escapes, expansions,
+command substitution or a heredoc, some layer of the chain eats part of it.
+Measured on this fleet:
 
   * heredoc bodies sent through ssh keep backslash escapes verbatim
     (`package\\x27s` landed in a commit message -- see canonical
@@ -11,7 +12,11 @@ a heredoc, some layer of the chain eats part of it. Measured on this fleet:
   * nested quotes inside `adb shell su -c "..."` are stripped by the device
     shell, silently turning a grep pattern into separate arguments;
   * `$2`/`$(...)` inside double quotes is expanded by the LOCAL shell before
-    ssh ever sees it.
+    ssh ever sees it;
+  * command substitution of any quote style is the recurring class: commit
+    messages and scripts smuggled through `$(cat ...)` inside an ssh payload
+    work by luck and break on the next quoting shift, so the whole class is
+    refused regardless of quoting.
 
 The pattern that has worked every time: write the remote script to a local
 file (Write tool), scp it, execute the file remotely. This gate refuses the
@@ -39,6 +44,13 @@ ADB_SHELL_RE = re.compile(r"\badb\b[^|;&]*\bshell\b")
 # Fragile payload shapes, each with the reason it cannot survive the trip.
 HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w+")
 HEX_ESCAPE_RE = re.compile(r"\\x[0-9a-fA-F]{2}")
+# Command substitution of any quote style. The double-quoted variant is expanded
+# by the LOCAL shell before ssh sees it; the single-quoted variant survives
+# locally but then depends on remote file state and remote shell semantics.
+# Both are the same class the fleet keeps re-learning (commit messages and
+# scripts smuggled through `$(cat ...)` inside an ssh payload), so both are
+# refused; the prescribed shape replaces all of them.
+COMMAND_SUB_RE = re.compile(r"\$\(|`")
 # su -c payload whose quoting nests another quote inside: `su -c "grep -E 'a|b' f"`.
 # A simple single-family payload (`su -c 'ls -l /p'`) must stay allowed.
 SU_C_NESTED_QUOTE_RE = re.compile(r"\bsu\s+-c\s+(['\"])(?:(?!\1).)*['\"](?:(?!\1).)*\1")
@@ -109,6 +121,8 @@ def fragile_hits(statement: str):
         hits.append("heredoc")
     if HEX_ESCAPE_RE.search(statement):
         hits.append("hex escape (\\xNN is never interpreted by bash)")
+    if COMMAND_SUB_RE.search(statement):
+        hits.append("command substitution (write the payload to a local file and scp it)")
     if SU_C_NESTED_QUOTE_RE.search(statement):
         hits.append("nested quotes inside su -c (stripped by the device shell)")
     if DOLLAR_IN_DOUBLE_RE.search(statement):
@@ -132,8 +146,9 @@ def evaluate(command: str):
             f"问题语句：{' '.join(statement.split())[:160]}\n"
             "这类载荷穿过 ssh / docker / adb 边界时会被某一层 shell 吃掉或原样带过去"
             "（本舰队实测：\\x27 原样进过 commit message、su -c 内嵌引号被剥、"
-            "$2 被本地 shell 展开）。改成历来每次都能救场的形状："
-            "① 用 Write 把远端脚本写到本地文件；② scp 到目标机；③ 远端 bash 执行该文件。"
+            "$(cat ...) 把 commit message/脚本偷渡进远端命令行）。改成历来每次都能救场的形状："
+            "① 用 Write 把远端脚本或提交信息写到本地文件；② scp 到目标机；③ 远端 bash 执行该文件"
+            "（提交用 git commit -F <scp 过去的文件>）。"
             "一次性放行：命令里加 `# gate:allow`；全局关闭：QODER_REMOTE_PAYLOAD_GATE=off。"
         )
     return False, ""
@@ -153,6 +168,7 @@ def selftest() -> int:
         ("ssh -o BatchMode=yes debian 'ls -la /tmp'", False),
         ("ssh debian 'cd /root/play/push/MiPushFramework && git status --short'", False),
         ("scp -q /tmp/warnfix/x.py debian:/tmp/x.py", False),
+        ("ssh debian 'cat /tmp/msg.txt'", False),
         ("adb -s bc569ae8 shell pm list packages", False),
         ("adb -s bc569ae8 shell su -c 'ls -l /data/user/0/com.xiaomi.xmsf/files/log/'", False),
         ("ssh debian 'ls' # gate:allow", False),
@@ -160,6 +176,13 @@ def selftest() -> int:
         ("cat > /tmp/local.txt <<EOF\nlocal heredoc is fine\nEOF", False),
         ("docker ps", False),
         ("adb devices", False),
+        # Command substitution is refused regardless of quote style: the
+        # single-quoted variant used to slip through and is exactly the shape
+        # that kept smuggling commit messages into remote command lines.
+        ("ssh debian 'git commit -m \"$(cat /tmp/msg.txt)\"'", True),
+        ("ssh debian 'git commit -m $(cat /tmp/msg.txt)'", True),
+        ("ssh debian 'echo `date`'", True),
+        ("ssh debian 'bash /tmp/run.sh && cat /tmp/out.txt'", False),
     ]
     failures = 0
     for command, expect in cases:
