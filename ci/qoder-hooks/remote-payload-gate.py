@@ -203,10 +203,13 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    if payload.get("tool_name") not in ("Bash", "mcp__node-repl__node_repl"):
-        return 0
+    tool_name = payload.get("tool_name")
     command = ((payload.get("tool_input") or {}).get("command")) or ""
     if not isinstance(command, str) or not command.strip():
+        return 0
+    # Qoder/Claude-style payloads carry tool_name; CodeBuddy's documented shape
+    # shows only tool_input.command, so a missing name must not silently allow.
+    if tool_name is not None and tool_name not in ("Bash", "mcp__node-repl__node_repl"):
         return 0
     deny, reason = evaluate(command)
     if not deny:
