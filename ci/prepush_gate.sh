@@ -139,6 +139,23 @@ if [ "$NEED_DOCKER" = "1" ]; then
     --build-arg TEMURIN_TAG=${MAGISK_CI_TEMURIN_TAG} \
     --build-arg RUST_TAG=${MAGISK_CI_RUST_TAG} \
     --build-arg BUN_TAG=${MAGISK_CI_BUN_TAG}"
+  # The CI runner injects the fleet proxy into builds; local runs must do the
+  # same or apt/apk inside the build has no route out. A host-loopback proxy
+  # (127.0.0.1/localhost) is NOT reachable from inside the build container --
+  # rewrite it to the docker bridge gateway. MAGISK_BUILD_PROXY overrides the
+  # whole set (used to reproduce the runner's exact proxy).
+  if [ -n "${MAGISK_BUILD_PROXY:-}" ]; then
+    BUILD_ARGS="$BUILD_ARGS --build-arg http_proxy=$MAGISK_BUILD_PROXY --build-arg https_proxy=$MAGISK_BUILD_PROXY --build-arg no_proxy=${no_proxy:-}"
+  else
+    BRIDGE_GW="$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo 172.17.0.1)"
+    for var in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+      eval "val=\${$var:-}"
+      if [ -n "$val" ]; then
+        val="$(printf '%s' "$val" | sed -E "s#(127\.0\.0\.1|localhost)#$BRIDGE_GW#g")"
+        BUILD_ARGS="$BUILD_ARGS --build-arg $var=$val"
+      fi
+    done
+  fi
   failed=0
   for target in ${MAGISK_CI_TARGETS:-utility android-jdk zygisk-rust webui-bun plugin-bun}; do
     echo "== building ${target} (linux/${ARCH})"

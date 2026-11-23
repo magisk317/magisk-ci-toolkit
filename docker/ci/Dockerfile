@@ -26,6 +26,14 @@ ARG BUN_TAG=1.4.5-alpine
 # target among several. Consumers reference it via .magisk_utility_base.
 # ---------------------------------------------------------------------------
 FROM alpine:${ALPINE_VERSION} AS utility
+# Network path for package operations: the CI runner injects the fleet proxy.
+# Declaring the ARGs makes `--build-arg http_proxy=...` actually reach the RUN
+# environment -- BuildKit silently drops build-args with no matching ARG, which
+# is how a local build ended up with no proxy while the runner had one.
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 
 # Pinned GitHub CLI version (static musl-compatible binary from upstream).
 ARG GH_VERSION=2.63.2
@@ -35,6 +43,7 @@ ARG TARGETARCH
 # Pre-install essential utility, scripting and linting packages needed by
 # CI controller jobs, notifications (TG/QQ), linting/testing, and catalog sync.
 # Having them pre-baked avoids latency and network failures during apk add in CI.
+COPY docker/ci/mirror-fallback.sh /usr/local/bin/mirror-fallback.sh
 RUN apk add --no-cache \
     bash \
     ca-certificates \
@@ -43,6 +52,21 @@ RUN apk add --no-cache \
     jq \
     python3 \
     openssl \
+    coreutils \
+    findutils \
+    shellcheck \
+    || /usr/local/bin/mirror-fallback.sh \
+    ; apk add --no-cache \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    python3 \
+    openssl \
+    coreutils \
+    findutils \
+    shellcheck \
     coreutils \
     findutils \
     shellcheck
@@ -63,8 +87,23 @@ RUN case "${TARGETARCH:-amd64}" in \
 # add only the packaging tools the pure-JVM jobs used to apt-install per run.
 # ---------------------------------------------------------------------------
 FROM eclipse-temurin:${TEMURIN_TAG} AS android-jdk
+# Network path for package operations: the CI runner injects the fleet proxy.
+# Declaring the ARGs makes `--build-arg http_proxy=...` actually reach the RUN
+# environment -- BuildKit silently drops build-args with no matching ARG, which
+# is how a local build ended up with no proxy while the runner had one.
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
-RUN apt-get update -qq \
+
+COPY docker/ci/mirror-fallback.sh /usr/local/bin/mirror-fallback.sh
+# The build network reaches mirrors through a proxy whose exit cannot reach
+# security.ubuntu.com (IPv6-only CDN answers, no IPv6 route on the exit), so a
+# default-sources update hangs and then 502s. Probe with a short timeout; on
+# failure the fallback script rewrites the sources to a reachable mirror.
+RUN apt-get -o Acquire::http::Timeout=8 -o Acquire::https::Timeout=8 update -qq \
+    || /usr/local/bin/mirror-fallback.sh \
+    ; apt-get -o Acquire::Retries=3 update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     git \
     fakeroot \
@@ -80,11 +119,22 @@ RUN apt-get update -qq \
 # runner's persistent mount.
 # ---------------------------------------------------------------------------
 FROM rust:${RUST_TAG} AS zygisk-rust
+# Network path for package operations: the CI runner injects the fleet proxy.
+# Declaring the ARGs makes `--build-arg http_proxy=...` actually reach the RUN
+# environment -- BuildKit silently drops build-args with no matching ARG, which
+# is how a local build ended up with no proxy while the runner had one.
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 
 # Keep in sync with MIPUSH_ZYGISK_RUST_TARGETS in MiPushFramework.
 ARG ANDROID_RUST_TARGETS="aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android"
 
-RUN apt-get update -qq \
+COPY docker/ci/mirror-fallback.sh /usr/local/bin/mirror-fallback.sh
+RUN apt-get -o Acquire::http::Timeout=8 -o Acquire::https::Timeout=8 update -qq \
+    || /usr/local/bin/mirror-fallback.sh \
+    ; apt-get -o Acquire::Retries=3 update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     clang \
