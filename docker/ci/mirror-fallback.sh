@@ -92,12 +92,15 @@ case "${ID:-}" in
   ubuntu)
     SUITES="$CODENAME $CODENAME-updates $CODENAME-security"
     COMPONENTS="main restricted universe multiverse"
-    CANDIDATES="http://mirrors.aliyun.com/ubuntu http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+    # Order matters: first candidate that validates wins. All three carry the
+# resolute development suites (aliyun does NOT -- verified 2026-11-23) and all
+# three answered 3/3 through the CI proxy path.
+CANDIDATES="http://mirrors.tuna.tsinghua.edu.cn/ubuntu http://mirrors.ustc.edu.cn/ubuntu http://mirror.nju.edu.cn/ubuntu"
     ;;
   debian)
     SUITES="$CODENAME $CODENAME-updates $CODENAME-security"
     COMPONENTS="main contrib non-free non-free-firmware"
-    CANDIDATES="http://mirrors.aliyun.com/debian http://mirrors.tuna.tsinghua.edu.cn/debian"
+    CANDIDATES="http://mirrors.tuna.tsinghua.edu.cn/debian http://mirrors.ustc.edu.cn/debian http://mirrors.aliyun.com/debian"
     ;;
 esac
 
@@ -125,10 +128,13 @@ write_apt_sources() {
     case "$f" in
       *.sources)
         {
+          # deb822 field lists are SPACE-separated. Comma-separated values are
+          # parsed by apt as a single suite name (verified 2026-11-23: apt then
+          # requests /dists/resolute,resolute-updates,.../Release and 404s).
           echo "Types: deb"
           echo "URIs: $mirror"
-          echo "Suites: $(echo "$SUITES" | tr ' ' ',')"
-          echo "Components: $(echo "$COMPONENTS" | tr ' ' ',')"
+          echo "Suites: $SUITES"
+          echo "Components: $COMPONENTS"
           echo "Signed-By: $keyring"
         } > "$f"
         ;;
