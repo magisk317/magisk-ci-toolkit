@@ -21,4 +21,39 @@ fi
 [ -n "$GATE" ] || { echo "pointer gate not found; refusing to push blind" >&2; exit 1; }
 echo "== pre-push $REMOTE $(printf '%s' "$REFS" | tr '\n' ' ')"
 python3 "$GATE" --mode pre-push --repo "$REPO" || exit 1
+
+# Build-warning gate: refuse pushes whose recent local builds produced findings
+# that are not on the fleet whitelist. Only logs newer than the push base are
+# scanned, so a warning fixed in an earlier commit cannot block a later push
+# through a stale log. Repos without local build logs pass silently here; the
+# CI assertion on the full-compile log is the authoritative layer for every
+# push. Escape valve: SKIP_WARNING_CHECK=1.
+if [ -z "${SKIP_WARNING_CHECK:-}" ]; then
+  WARNING_CHECKER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_build_warnings.py"
+  if [ -f "$WARNING_CHECKER" ]; then
+    WARNING_WHITELIST="${MAGISK_WARNING_WHITELIST:-}"
+    if [ -z "$WARNING_WHITELIST" ]; then
+      for candidate in \
+        "$(dirname "$WARNING_CHECKER")/../config/build-warning-whitelist.txt" \
+        "$REPO/.magisk-ci-toolkit/ci/config/build-warning-whitelist.txt"; do
+        [ -f "$candidate" ] && WARNING_WHITELIST="$candidate" && break
+      done
+    fi
+    if [ -n "$WARNING_WHITELIST" ]; then
+      WARNING_BASE=""
+      while read -r local_ref _local_sha _remote_ref remote_sha; do
+        case "$local_ref" in refs/heads/*) ;; *) continue ;; esac
+        if [ -n "$remote_sha" ] && [ "$remote_sha" != "0000000000000000000000000000000000000000" ] \
+          && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+          WARNING_BASE="$remote_sha"
+          break
+        fi
+      done <<<"$REFS"
+      WARNING_ARGS=(--repo "$REPO" --scan-dir "$REPO/.build-logs" --whitelist "$WARNING_WHITELIST")
+      [ -n "$WARNING_BASE" ] && WARNING_ARGS+=(--since-commit "$WARNING_BASE")
+      echo "== build-warning gate $REMOTE"
+      python3 "$WARNING_CHECKER" "${WARNING_ARGS[@]}" || exit 1
+    fi
+  fi
+fi
 exit 0

@@ -1,0 +1,34 @@
+# Fleet build-warning whitelist.
+#
+# Consumed by:
+#   ci/git_hooks/check_build_warnings.py  (pre-push gate, scans local .build-logs/)
+#   .gitlab/ci/android.yml                (CI assertion on the build job log)
+#
+# Format (one entry per line, '|' separated, '#' comments allowed):
+#   repo-glob | file-glob | warning-key | reason | confirmed-by/date
+#
+#   repo-glob    fnmatch against the repository directory name ('*' = every repo).
+#                Python fnmatch semantics: '*' also matches '/'.
+#   file-glob    fnmatch against the finding's source path, relative to the repo
+#                root (e.g. '**/build.gradle.kts' or 'xposed/**/*.kt').
+#   warning-key  'kotlin:<DIAGNOSTIC_ID>' for Gradle problems-report findings,
+#                'gradle-deprecation:<api signature>' for configuration-phase
+#                deprecations. Exact string equality.
+#   reason       why it cannot be fixed in the consuming repo (upstream plugin,
+#                toolchain, frozen code). Required for every entry.
+#   confirmed    who confirmed and when.
+#
+# Management protocol (owner standing rule, 2026-11-23):
+#   - Cleanable warnings are fixed in code, never listed here.
+#   - Only unfixable findings (upstream plugin/toolchain behavior) may be listed,
+#     each with a reason and confirmation.
+#   - Unconfirmed candidates are held for owner confirmation; once confirmed,
+#     entries are added or removed directly.
+# - Every entry must name the upstream defect; when the upstream ships a fix,
+#   remove the entry in the same change that bumps the dependency.
+
+# The detekt Gradle plugin itself calls Configuration.setVisible while applying
+# (DetektBasePlugin.kt:60) and while configuring plugin dependencies
+# (DetektPlugin.kt:124). The deprecated call is inside the plugin, so no consumer
+# repo can remove it; revisit when detekt drops the call.
+* | *build.gradle.kts | gradle-deprecation:Configuration.setVisible(boolean) | upstream detekt Gradle plugin (DetektBasePlugin.kt:60, DetektPlugin.kt:124) | owner 2026-11-23
