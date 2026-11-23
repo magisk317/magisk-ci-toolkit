@@ -8,10 +8,16 @@ if [ -f "$policy" ]; then
   expected_name=$(sed -n 's/^name=//p' "$policy" | head -n 1)
   expected_email=$(sed -n 's/^email=//p' "$policy" | head -n 1)
 else
-  baseline=$(git -C "$repo" log -20 --format='%an%x09%ae' 2>/dev/null || true | awk -F '\t' '
+  # NOTE: the `|| true` must stay OUTSIDE the command substitution. Placed
+  # inside the pipeline (`git ... || true | awk`) it short-circuits on success
+  # and awk never runs, so baseline becomes the raw multi-line log and every
+  # repo with mixed identities in its last 20 commits gets blocked (that
+  # regression shipped in 40f8148; fixed here). Outside, the pipeline stays
+  # intact on success and pipefail failures (empty repos) are absorbed.
+  baseline=$(git -C "$repo" log -20 --format='%an%x09%ae' 2>/dev/null | awk -F '\t' '
     NF >= 2 { count[$0]++; if (count[$0] > max) { max = count[$0]; winner = $0 } }
     END { print winner }
-  ')
+  ') || true
   [ -n "$baseline" ] || exit 0
   expected_name=${baseline%%$'\t'*}
   expected_email=${baseline#*$'\t'}
