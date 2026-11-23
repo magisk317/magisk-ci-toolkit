@@ -112,7 +112,9 @@ check_commit_messages() {
     if [[ "$allow_non_ascii_subject" != "true" ]] && printf '%s' "$subject" | LC_ALL=C grep -q '[^ -~]'; then
       subject_offenders+=("$sha|$subject")
     fi
-    if [[ "$allow_non_ascii_body" != "true" ]] && printf '%s' "$body" | LC_ALL=C grep -qP '[^\x20-\x7e\t]'; then
+    # BusyBox grep in the CI utility image has no -P; the POSIX bracket below keeps
+    # the same set (printable ASCII minus tab, negated) as the previous PCRE class.
+    if [[ "$allow_non_ascii_body" != "true" ]] && printf '%s' "$body" | LC_ALL=C grep -q "[^ -~$(printf '\t')]"; then
       body_offenders+=("$sha")
     fi
   done < <(git -C "$root_dir" log --no-merges -z --pretty=tformat:'%h%x02%B' "$commit_range")
