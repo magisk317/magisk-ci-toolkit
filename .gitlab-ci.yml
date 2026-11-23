@@ -67,6 +67,7 @@ shell:test:
     - >-
       shellcheck -x
       ci/check_shell_syntax.sh
+      ci/prepush_gate.sh
       ci/git_hooks/pre-push
       ci/tests/test_check_build_warnings.sh
       ci/tests/test_check_shell_syntax.sh
@@ -117,6 +118,7 @@ shell:test:
       release/tests/test_check_release_guard.sh
       ci/tests/test_trusted_projects.sh
     - bash ci/tests/test_check_build_warnings.sh
+    - bash ci/tests/test_precommit_stage_warning.sh
     - bash ci/tests/test_check_shell_syntax.sh
     - bash ci/tests/test_verify_mirror_targets.sh
     - bash ci/tests/test_cancel_older_mr_pipelines.sh

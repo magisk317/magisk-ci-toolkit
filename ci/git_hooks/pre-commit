@@ -8,7 +8,7 @@ if [ -f "$policy" ]; then
   expected_name=$(sed -n 's/^name=//p' "$policy" | head -n 1)
   expected_email=$(sed -n 's/^email=//p' "$policy" | head -n 1)
 else
-  baseline=$(git -C "$repo" log -20 --format='%an%x09%ae' 2>/dev/null | awk -F '\t' '
+  baseline=$(git -C "$repo" log -20 --format='%an%x09%ae' 2>/dev/null || true | awk -F '\t' '
     NF >= 2 { count[$0]++; if (count[$0] > max) { max = count[$0]; winner = $0 } }
     END { print winner }
   ')
@@ -52,4 +52,31 @@ fi
 pointer_gate="${MAGISK_POINTER_GATE:-/root/play/magisk-ci-toolkit/ci/git_hooks/pointer_gate.py}"
 if [ -f "$pointer_gate" ]; then
   python3 "$pointer_gate" --mode pre-commit --repo "$repo"
+fi
+
+# --- recently-modified-but-unstaged warning (H7, 2026-11-23) ----------------
+# The fleet's "forgot to stage a file" incident: an edited .gitlab-ci.yml was
+# left out of a commit and only surfaced after the push (costing an amend).
+# Files touched within the window that are NOT part of this commit get a
+# warning -- never a block, because shared dirty trees legitimately carry
+# other people's unstaged work.
+STAGE_WINDOW_MINUTES="${MAGISK_STAGE_WINDOW_MINUTES:-15}"
+cutoff=$(( $(date +%s) - STAGE_WINDOW_MINUTES * 60 ))
+recent_unstaged=""
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  [ -e "$f" ] || continue
+  mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+  if [ "$mtime" -ge "$cutoff" ]; then
+    recent_unstaged="$recent_unstaged $f"
+  fi
+done <<INPUT
+$(git diff --name-only; git ls-files --others --exclude-standard)
+INPUT
+if [ -n "$recent_unstaged" ]; then
+  echo "pre-commit: 注意 -- 以下文件在最近 ${STAGE_WINDOW_MINUTES} 分钟内被修改但未进入本次提交:" >&2
+  for f in $recent_unstaged; do
+    echo "  $f" >&2
+  done
+  echo "  若是本笔改动的一部分，请 git add 后重新提交；若是他人 WIP 可忽略。" >&2
 fi
