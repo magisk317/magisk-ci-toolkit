@@ -254,7 +254,7 @@ def selftest() -> int:
     check("cat %s/definitely-not-here-12345.txt" % tmp, True)
     check("less %s/definitely-not-here-12345.txt" % tmp, True)
     check("stat %s/definitely-not-here-12345.txt" % tmp, True)
-    check("cat /etc/hostname", False)
+    check("cat /etc/hosts", False)
     check("cat /dev/null", False)
     check("grep -c foo /var/log/syslog", False)
     check("cat /etc/hostname /etc/hosts", False)
