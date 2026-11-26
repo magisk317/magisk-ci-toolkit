@@ -156,6 +156,43 @@ if [ "$rc" = "0" ]; then
 else
   bad "escape valve (rc=$rc)"; cat push2.txt
 fi
+# --- 9: HEAD:branch refspec still uses the remote commit as the freshness base ---
+H="$T/head-ref-repo"
+mkdir -p "$H/.build-logs"
+git init -q "$H" >/dev/null 2>&1
+git -C "$H" config user.name t; git -C "$H" config user.email t@e.com
+echo seed > "$H/seed.txt"
+git -C "$H" add seed.txt && git -C "$H" commit -qm seed
+echo base > "$H/base.txt"
+git -C "$H" add base.txt && git -C "$H" commit -qm base
+base_sha=$(git -C "$H" rev-parse HEAD)
+echo tip > "$H/tip.txt"
+git -C "$H" add tip.txt && git -C "$H" commit -qm tip
+tip_sha=$(git -C "$H" rev-parse HEAD)
+cat > "$H/.build-logs/stale-kotlin.log" <<FIXTURE
+Problem found: Kotlin compiler: RETURN_VALUE_NOT_USED (id: RETURN_VALUE_NOT_USED, in kotlin > compiler:warning)
+  Kotlin compiler warning
+    Unused return value of 'runCatching'.
+    Location: $H/xposed/src/main/java/Foo.kt:1
+FIXTURE
+base_epoch=$(git -C "$H" show -s --format=%ct "$base_sha")
+touch -d "@$((base_epoch - 1))" "$H/.build-logs/stale-kotlin.log"
+mkdir -p "$H/.git/hooks"
+cp "$HOOKS_DIR/pre-push" "$H/.git/hooks/pre-push"
+cp "$CHECKER" "$H/.git/hooks/check_build_warnings.py"
+chmod +x "$H/.git/hooks/pre-push" "$H/.git/hooks/check_build_warnings.py"
+(
+  cd "$H" || exit 1
+  printf 'HEAD %s refs/heads/main %s\n' "$tip_sha" "$base_sha" \
+    | MAGISK_POINTER_GATE="$T/gate-stub.py" MAGISK_WARNING_WHITELIST="$WHITELIST" \
+      .git/hooks/pre-push origin /tmp/nr >head-ref-push.txt 2>&1
+)
+rc=$?
+if [ "$rc" = "0" ] && ! grep -q "BLOCKED" "$H/head-ref-push.txt"; then
+  ok "HEAD:branch refspec filters stale warning logs"
+else
+  bad "HEAD:branch refspec freshness (rc=$rc)"; cat "$H/head-ref-push.txt"
+fi
 
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
 [ "$FAIL" = "0" ]

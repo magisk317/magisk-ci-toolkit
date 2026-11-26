@@ -41,8 +41,8 @@ if [ -z "${SKIP_WARNING_CHECK:-}" ]; then
     fi
     if [ -n "$WARNING_WHITELIST" ]; then
       WARNING_BASE=""
-      while read -r local_ref _local_sha _remote_ref remote_sha; do
-        case "$local_ref" in refs/heads/*) ;; *) continue ;; esac
+      while read -r _local_ref _local_sha remote_ref remote_sha; do
+        case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac
         if [ -n "$remote_sha" ] && [ "$remote_sha" != "0000000000000000000000000000000000000000" ] \
           && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
           WARNING_BASE="$remote_sha"
