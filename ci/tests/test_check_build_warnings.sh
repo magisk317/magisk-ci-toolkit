@@ -156,7 +156,25 @@ if [ "$rc" = "0" ]; then
 else
   bad "escape valve (rc=$rc)"; cat push2.txt
 fi
-# --- 9: HEAD:branch refspec still uses the remote commit as the freshness base ---
+# --- 9: CI config must not invoke a .py file via bash/sh (python scripts need python3) ---
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+if grep -rnE --include='*.yml' '(bash|sh)[[:space:]]+"?[^"[:space:]]*\.py([[:space:]]|$)' \
+    "$REPO_ROOT/.gitlab-ci.yml" "$REPO_ROOT/.gitlab/ci" >inv.txt 2>&1; then
+  bad "CI shell-invokes a .py file"; cat inv.txt
+else
+  ok "CI invokes Python gate via python3"
+fi
+
+# --- 10: warning gate must not sit inside the build template (delivery first) ---
+ANDROID_YML="$(cd "$HERE/../.." && pwd)/.gitlab/ci/android.yml"
+build_block="$(sed -n '/^\.magisk_android_build:/,/^\.magisk_android_build_warnings:/p' "$ANDROID_YML")"
+if printf '%s\n' "$build_block" | grep -q "check_build_warnings\.py"; then
+  bad "warning gate still inside build template"
+else
+  ok "warning gate is out of the build template"
+fi
+
+# --- 10: HEAD:branch refspec still uses the remote commit as the freshness base ---
 H="$T/head-ref-repo"
 mkdir -p "$H/.build-logs"
 git init -q "$H" >/dev/null 2>&1
